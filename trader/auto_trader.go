@@ -1,6 +1,7 @@
 package trader
 
 import (
+    "encoding/json"
     "fmt"
     "log"
     "math"
@@ -8,7 +9,10 @@ import (
     "strings"
     "time"
 
+    "nofx/decision"
     "nofx/logger"
+    "nofx/mcp"
+    "nofx/pool"
 )
 
 // AutoTraderConfig 自动交易器配置（与 manager.TraderManager 构造保持一致）
@@ -79,6 +83,11 @@ type AutoTrader struct {
     // 资金与周期
     initialBalance float64
     scanInterval   time.Duration
+
+    // AI & leverage
+    aiClient        *mcp.Client
+    btcethLeverage  int
+    altcoinLeverage int
 }
 
 // NewAutoTrader 创建自动交易器
@@ -137,7 +146,22 @@ func NewAutoTrader(cfg AutoTraderConfig) (*AutoTrader, error) {
         lastReset:      time.Now(),
         initialBalance: cfg.InitialBalance,
         scanInterval:   scan,
+        btcethLeverage:  cfg.BTCETHLeverage,
+        altcoinLeverage: cfg.AltcoinLeverage,
     }
+
+    // 初始化AI客户端
+    ai := mcp.New()
+    model := strings.ToLower(strings.TrimSpace(cfg.AIModel))
+    switch model {
+    case "qwen":
+        ai.SetQwenAPIKey(cfg.QwenKey, "")
+    case "custom":
+        ai.SetCustomAPI(cfg.CustomAPIURL, cfg.CustomAPIKey, cfg.CustomModelName)
+    default:
+        ai.SetDeepSeekAPIKey(cfg.DeepSeekKey)
+    }
+    at.aiClient = ai
 
     return at, nil
 }
@@ -159,13 +183,16 @@ func (a *AutoTrader) Run() error {
     a.startTime = time.Now()
     log.Printf(" 启动Trader: %s (%s, %s)", a.name, strings.ToUpper(a.aiModel), strings.ToUpper(a.exchange))
 
-    // 最小工作循环：仅用于统计与心跳，避免空转
+    // 先执行一次决策周期，避免首次空转
+    a.runDecisionCycle()
+
+    // 周期性执行决策
     go func() {
         ticker := time.NewTicker(a.scanInterval)
         defer ticker.Stop()
         for a.isRunning {
-            a.callCount++
             <-ticker.C
+            a.runDecisionCycle()
         }
     }()
 
@@ -337,3 +364,149 @@ func strconvParseFloat(s string) (float64, error) {
 
 func round2(f float64) float64 { return math.Round(f*100) / 100 }
 func round3(f float64) float64 { return math.Round(f*1000) / 1000 }
+
+// runDecisionCycle 构建上下文、获取AI决策并记录日志
+func (a *AutoTrader) runDecisionCycle() {
+    a.callCount++
+
+    // 获取账户信息与持仓
+    account, err := a.GetAccountInfo()
+    if err != nil {
+        log.Printf("⚠️ 获取账户信息失败，使用默认账户快照: %v", err)
+        account = map[string]interface{}{
+            "total_equity":       a.initialBalance,
+            "available_balance":  a.initialBalance,
+            "total_pnl":          0.0,
+            "total_pnl_pct":      0.0,
+            "margin_used":        0.0,
+            "margin_used_pct":    0.0,
+            "position_count":     0,
+        }
+    }
+    posList, err := a.GetPositions()
+    if err != nil {
+        log.Printf("⚠️ 获取持仓失败: %v", err)
+        posList = []map[string]interface{}{}
+    }
+
+    // 构建决策上下文中的账户与持仓结构
+    accInfo := decision.AccountInfo{
+        TotalEquity:      getFloat(account, "total_equity"),
+        AvailableBalance: getFloat(account, "available_balance"),
+        TotalPnL:         getFloat(account, "total_pnl"),
+        TotalPnLPct:      getFloat(account, "total_pnl_pct"),
+        MarginUsed:       getFloat(account, "margin_used"),
+        MarginUsedPct:    getFloat(account, "margin_used_pct"),
+        PositionCount:    int(getFloat(map[string]interface{}{"position_count": float64(len(posList))}, "position_count")),
+    }
+
+    var positions []decision.PositionInfo
+    nowMs := time.Now().UnixMilli()
+    for _, p := range posList {
+        positions = append(positions, decision.PositionInfo{
+            Symbol:           toString(p["symbol"]),
+            Side:             toString(p["side"]),
+            EntryPrice:       getFloat(p, "entry_price"),
+            MarkPrice:        getFloat(p, "mark_price"),
+            Quantity:         getFloat(p, "quantity"),
+            Leverage:         int(getFloat(p, "leverage")),
+            UnrealizedPnL:    getFloat(p, "unrealized_pnl"),
+            UnrealizedPnLPct: getFloat(p, "unrealized_pnl_pct"),
+            LiquidationPrice: getFloat(p, "liquidation_price"),
+            MarginUsed:       getFloat(p, "margin_used"),
+            UpdateTime:       nowMs,
+        })
+    }
+
+    // 合并币种池（AI500 + OI Top）作为候选列表
+    merged, err := pool.GetMergedCoinPool(20)
+    candidateCoins := make([]decision.CandidateCoin, 0)
+    if err != nil {
+        log.Printf("⚠️ 获取合并币种池失败: %v", err)
+    } else {
+        for _, symbol := range merged.AllSymbols {
+            candidateCoins = append(candidateCoins, decision.CandidateCoin{
+                Symbol:  symbol,
+                Sources: merged.SymbolSources[symbol],
+            })
+        }
+    }
+
+    // 历史表现（用于系统提示中的夏普比率反馈）
+    perf, _ := a.decisionLogger.AnalyzePerformance(100)
+
+    // 构建上下文
+    ctx := &decision.Context{
+        CurrentTime:     time.Now().Format("2006-01-02 15:04:05"),
+        RuntimeMinutes:  int(time.Since(a.startTime).Minutes()),
+        CallCount:       a.callCount,
+        Account:         accInfo,
+        Positions:       positions,
+        CandidateCoins:  candidateCoins,
+        Performance:     perf,
+        BTCETHLeverage:  a.btcethLeverage,
+        AltcoinLeverage: a.altcoinLeverage,
+    }
+
+    // 调用AI决策引擎
+    fullDecision, err := decision.GetFullDecision(ctx, a.aiClient)
+    record := &logger.DecisionRecord{
+        AccountState: logger.AccountSnapshot{
+            TotalBalance:          accInfo.TotalEquity,
+            AvailableBalance:      accInfo.AvailableBalance,
+            TotalUnrealizedProfit: accInfo.TotalPnL,
+            PositionCount:         accInfo.PositionCount,
+            MarginUsedPct:         accInfo.MarginUsedPct,
+        },
+        Positions:      []logger.PositionSnapshot{},
+        CandidateCoins: []string{},
+        ExecutionLog:   []string{},
+        Success:        err == nil,
+    }
+
+    for _, p := range positions {
+        record.Positions = append(record.Positions, logger.PositionSnapshot{
+            Symbol:           p.Symbol,
+            Side:             p.Side,
+            PositionAmt:      p.Quantity,
+            EntryPrice:       p.EntryPrice,
+            MarkPrice:        p.MarkPrice,
+            UnrealizedProfit: p.UnrealizedPnL,
+            Leverage:         float64(p.Leverage),
+            LiquidationPrice: p.LiquidationPrice,
+        })
+    }
+    for _, c := range candidateCoins {
+        record.CandidateCoins = append(record.CandidateCoins, c.Symbol)
+    }
+
+    if err != nil {
+        record.InputPrompt = ""
+        record.CoTTrace = ""
+        record.DecisionJSON = "[]"
+        record.ErrorMessage = fmt.Sprintf("AI决策失败: %v", err)
+        record.ExecutionLog = append(record.ExecutionLog, "AI调用失败，未执行交易，仅记录账户与持仓快照")
+        _ = a.decisionLogger.LogDecision(record)
+        return
+    }
+
+    decBytes, _ := json.Marshal(fullDecision.Decisions)
+    record.InputPrompt = fullDecision.UserPrompt
+    record.CoTTrace = fullDecision.CoTTrace
+    record.DecisionJSON = string(decBytes)
+    record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("AI生成%d条决策；当前版本仅记录不执行", len(fullDecision.Decisions)))
+
+    if err := a.decisionLogger.LogDecision(record); err != nil {
+        log.Printf("⚠️ 记录决策失败: %v", err)
+    }
+}
+
+func toString(v interface{}) string {
+    if v == nil { return "" }
+    switch t := v.(type) {
+    case string:
+        return t
+    default:
+        return fmt.Sprintf("%v", t)
+    }
+}
