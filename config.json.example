@@ -1,4 +1,4 @@
-{
+﻿{
   "traders": [
     {
       "id": "okx_deepseek",
@@ -6,10 +6,10 @@
       "enabled": true,
       "ai_model": "deepseek",
       "exchange": "okx",
-      "okx_api_key": "5f188701-a2e2-4ff7-ba1c-8eaa41ee5204",
-      "okx_secret_key": "4EC4B4871C516FA396C1DDC6E49C137A",
-      "okx_password": "Aa@110110",
-      "deepseek_key": "sk-c89ec40e81614abea2a21f054ec18662",
+      "okx_api_key": "your_okx_api_key",
+      "okx_secret_key": "your_okx_secret_key",
+      "okx_passphrase": "your_okx_passphrase",
+      "deepseek_key": "sk-your-deepseek-key",
       "initial_balance": 1000,
       "scan_interval_minutes": 3
     },
@@ -19,13 +19,10 @@
       "enabled": true,
       "ai_model": "qwen",
       "exchange": "okx",
-      "okx_api_key": "5f188701-a2e2-4ff7-ba1c-8eaa41ee5204",
-      "okx_secret_key": "4EC4B4871C516FA396C1DDC6E49C137A",
-      "okx_password": "Aa@110110",
-      "qwen_key": "sk-57ba1b0068f24474be13bbaf4ec82ac5",
-      "qwen_model": "qwen3-max",
-      "qwen_temperature": 0.1,
-      "qwen_max_tokens": 2000,
+      "okx_api_key": "your_okx_api_key",
+      "okx_secret_key": "your_okx_secret_key",
+      "okx_passphrase": "your_okx_passphrase",
+      "qwen_key": "sk-your-qwen-key",
       "initial_balance": 1000,
       "scan_interval_minutes": 3
     }

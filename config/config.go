@@ -1,4 +1,4 @@
-﻿package config
+package config
 
 import (
 	"encoding/json"
@@ -13,9 +13,10 @@ type TraderConfig struct {
 	Name    string `json:"name"`
 	Enabled bool   `json:"enabled"` // 鏄惁鍚敤璇rader
 	AIModel string `json:"ai_model"` // "qwen" or "deepseek"
+    Exchange string `json:"exchange"`
 
 	// 浜ゆ槗骞冲彴閫夋嫨锛堜簩閫変竴锛?
-	Exchange string `json:"exchange"` // "binance" or "hyperliquid"
+
 
 	// 甯佸畨閰嶇疆
 	BinanceAPIKey    string `json:"binance_api_key,omitempty"`
@@ -31,6 +32,11 @@ type TraderConfig struct {
 	AsterSigner     string `json:"aster_signer,omitempty"`      // Aster API閽卞寘鍦板潃
 	AsterPrivateKey string `json:"aster_private_key,omitempty"` // Aster API閽卞寘绉侀挜
 
+
+    // OKX配置
+    OKXAPIKey     string `json:"okx_api_key,omitempty"`
+    OKXSecretKey  string `json:"okx_secret_key,omitempty"`
+    OKXPassphrase string `json:"okx_passphrase,omitempty"`
 	// AI閰嶇疆
 	QwenKey     string `json:"qwen_key,omitempty"`
 	DeepSeekKey string `json:"deepseek_key,omitempty"`
@@ -105,98 +111,84 @@ func LoadConfig(filename string) (*Config, error) {
 
 // Validate 楠岃瘉閰嶇疆鏈夋晥鎬?
 func (c *Config) Validate() error {
-	if len(c.Traders) == 0 {
-		return fmt.Errorf("鑷冲皯闇€瑕侀厤缃竴涓猼rader")
-	}
+    if len(c.Traders) == 0 {
+        return fmt.Errorf("至少需要配置一个trader")
+    }
 
-	traderIDs := make(map[string]bool)
-	for i, trader := range c.Traders {
-		if trader.ID == "" {
-			return fmt.Errorf("trader[%d]: ID涓嶈兘涓虹┖", i)
-		}
-		if traderIDs[trader.ID] {
-			return fmt.Errorf("trader[%d]: ID '%s' 閲嶅", i, trader.ID)
-		}
-		traderIDs[trader.ID] = true
+    traderIDs := make(map[string]bool)
+    for i, trader := range c.Traders {
+        if trader.ID == "" {
+            return fmt.Errorf("trader[%d]: ID不能为空", i)
+        }
+        if traderIDs[trader.ID] {
+            return fmt.Errorf("trader[%d]: ID '%s' 重复", i, trader.ID)
+        }
+        traderIDs[trader.ID] = true
 
-		if trader.Name == "" {
-			return fmt.Errorf("trader[%d]: Name涓嶈兘涓虹┖", i)
-		}
-		if trader.AIModel != "qwen" && trader.AIModel != "deepseek" && trader.AIModel != "custom" {
-			return fmt.Errorf("trader[%d]: ai_model蹇呴』鏄?'qwen', 'deepseek' 鎴?'custom'", i)
-		}
+        if trader.Name == "" {
+            return fmt.Errorf("trader[%d]: Name不能为空", i)
+        }
+        if trader.AIModel != "qwen" && trader.AIModel != "deepseek" && trader.AIModel != "custom" {
+            return fmt.Errorf("trader[%d]: ai_model必须是 'qwen', 'deepseek' 或 'custom'", i)
+        }
 
-		// 楠岃瘉浜ゆ槗骞冲彴閰嶇疆
-		if trader.Exchange == "" {
-			trader.Exchange = "binance" // 榛樿浣跨敤甯佸畨
-		}
-		if trader.Exchange != "binance" && trader.Exchange != "hyperliquid" && trader.Exchange != "aster" {
-			return fmt.Errorf("trader[%d]: exchange蹇呴』鏄?'binance', 'hyperliquid' 鎴?'aster'", i)
-		}
+        // 仅允许 OKX 交易所
+        if trader.Exchange == "" {
+            trader.Exchange = "okx"
+        }
+        if trader.Exchange != "okx" {
+            return fmt.Errorf("trader[%d]: 仅支持 OKX 交易所，请将 exchange 设置为 'okx'", i)
+        }
+        if trader.OKXAPIKey == "" || trader.OKXSecretKey == "" || trader.OKXPassphrase == "" {
+            return fmt.Errorf("trader[%d]: 使用OKX时必须配置okx_api_key, okx_secret_key和okx_passphrase", i)
+        }
 
-		// 鏍规嵁骞冲彴楠岃瘉瀵瑰簲鐨勫瘑閽?
-		if trader.Exchange == "binance" {
-			if trader.BinanceAPIKey == "" || trader.BinanceSecretKey == "" {
-				return fmt.Errorf("trader[%d]: 浣跨敤甯佸畨鏃跺繀椤婚厤缃産inance_api_key鍜宐inance_secret_key", i)
-			}
-		} else if trader.Exchange == "hyperliquid" {
-			if trader.HyperliquidPrivateKey == "" {
-				return fmt.Errorf("trader[%d]: 浣跨敤Hyperliquid鏃跺繀椤婚厤缃甴yperliquid_private_key", i)
-			}
-		} else if trader.Exchange == "aster" {
-			if trader.AsterUser == "" || trader.AsterSigner == "" || trader.AsterPrivateKey == "" {
-				return fmt.Errorf("trader[%d]: 浣跨敤Aster鏃跺繀椤婚厤缃產ster_user, aster_signer鍜宎ster_private_key", i)
-			}
-		}
+        if trader.AIModel == "qwen" && trader.QwenKey == "" {
+            return fmt.Errorf("trader[%d]: 使用Qwen时必须配置qwen_key", i)
+        }
+        if trader.AIModel == "deepseek" && trader.DeepSeekKey == "" {
+            return fmt.Errorf("trader[%d]: 使用DeepSeek时必须配置deepseek_key", i)
+        }
+        if trader.AIModel == "custom" {
+            if trader.CustomAPIURL == "" {
+                return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_api_url", i)
+            }
+            if trader.CustomAPIKey == "" {
+                return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_api_key", i)
+            }
+            if trader.CustomModelName == "" {
+                return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_model_name", i)
+            }
+        }
 
-		if trader.AIModel == "qwen" && trader.QwenKey == "" {
-			return fmt.Errorf("trader[%d]: 浣跨敤Qwen鏃跺繀椤婚厤缃畄wen_key", i)
-		}
-		if trader.AIModel == "deepseek" && trader.DeepSeekKey == "" {
-			return fmt.Errorf("trader[%d]: 浣跨敤DeepSeek鏃跺繀椤婚厤缃甦eepseek_key", i)
-		}
-		if trader.AIModel == "custom" {
-			if trader.CustomAPIURL == "" {
-				return fmt.Errorf("trader[%d]: 浣跨敤鑷畾涔堿PI鏃跺繀椤婚厤缃甤ustom_api_url", i)
-			}
-			if trader.CustomAPIKey == "" {
-				return fmt.Errorf("trader[%d]: 浣跨敤鑷畾涔堿PI鏃跺繀椤婚厤缃甤ustom_api_key", i)
-			}
-			if trader.CustomModelName == "" {
-				return fmt.Errorf("trader[%d]: 浣跨敤鑷畾涔堿PI鏃跺繀椤婚厤缃甤ustom_model_name", i)
-			}
-		}
-		if trader.InitialBalance <= 0 {
-			return fmt.Errorf("trader[%d]: initial_balance蹇呴』澶т簬0", i)
-		}
-		if trader.ScanIntervalMinutes <= 0 {
-			trader.ScanIntervalMinutes = 3 // 榛樿3鍒嗛挓
-		}
-	}
+        if trader.InitialBalance <= 0 {
+            return fmt.Errorf("trader[%d]: initial_balance必须大于0", i)
+        }
+        if trader.ScanIntervalMinutes <= 0 {
+            trader.ScanIntervalMinutes = 3
+        }
+    }
 
-	if c.APIServerPort <= 0 {
-		c.APIServerPort = 8080 // 榛樿8080绔彛
-	}
+    if c.APIServerPort <= 0 {
+        c.APIServerPort = 8080
+    }
 
-	// 璁剧疆鏉犳潌榛樿鍊硷紙閫傞厤甯佸畨瀛愯处鎴烽檺鍒讹紝鏈€澶?鍊嶏級
-	if c.Leverage.BTCETHLeverage <= 0 {
-		c.Leverage.BTCETHLeverage = 5 // 榛樿5鍊嶏紙瀹夊叏鍊硷紝閫傞厤瀛愯处鎴凤級
-	}
-	if c.Leverage.BTCETHLeverage > 5 {
-		fmt.Printf("鈿狅笍  璀﹀憡: BTC/ETH鏉犳潌璁剧疆涓?dx锛屽鏋滀娇鐢ㄥ瓙璐︽埛鍙兘浼氬け璐ワ紙瀛愯处鎴烽檺鍒垛墹5x锛塡n", c.Leverage.BTCETHLeverage)
-	}
-	if c.Leverage.AltcoinLeverage <= 0 {
-		c.Leverage.AltcoinLeverage = 5 // 榛樿5鍊嶏紙瀹夊叏鍊硷紝閫傞厤瀛愯处鎴凤級
-	}
-	if c.Leverage.AltcoinLeverage > 5 {
-		fmt.Printf("鈿狅笍  璀﹀憡: 灞卞甯佹潬鏉嗚缃负%dx锛屽鏋滀娇鐢ㄥ瓙璐︽埛鍙兘浼氬け璐ワ紙瀛愯处鎴烽檺鍒垛墹5x锛塡n", c.Leverage.AltcoinLeverage)
-	}
+    if c.Leverage.BTCETHLeverage <= 0 {
+        c.Leverage.BTCETHLeverage = 5
+    }
+    if c.Leverage.AltcoinLeverage <= 0 {
+        c.Leverage.AltcoinLeverage = 5
+    }
 
-	return nil
+    return nil
 }
 
-// GetScanInterval 鑾峰彇鎵弿闂撮殧
 func (tc *TraderConfig) GetScanInterval() time.Duration {
 	return time.Duration(tc.ScanIntervalMinutes) * time.Minute
 }
+
+
+
+
+
 
