@@ -135,6 +135,50 @@ func (t *OKXTrader) doRequestJSON(method, path string, query map[string]string, 
     return body, nil
 }
 
+// ===== 原始数据获取方法（用于对齐 yuanbao.py） =====
+// GetRawAccountBalance 返回 OKX /api/v5/account/balance 的原始响应
+func (t *OKXTrader) GetRawAccountBalance() (map[string]interface{}, error) {
+    body, err := t.doRequest("GET", "/api/v5/account/balance", map[string]string{})
+    if err != nil {
+        return nil, err
+    }
+    var resp map[string]interface{}
+    if json.Unmarshal(body, &resp) != nil {
+        return nil, fmt.Errorf("账户余额响应解析失败")
+    }
+    return resp, nil
+}
+
+// GetRawPositions 返回 OKX /api/v5/account/positions 的原始响应（默认 SWAP）
+func (t *OKXTrader) GetRawPositions() (map[string]interface{}, error) {
+    body, err := t.doRequest("GET", "/api/v5/account/positions", map[string]string{"instType": "SWAP"})
+    if err != nil {
+        return nil, err
+    }
+    var resp map[string]interface{}
+    if json.Unmarshal(body, &resp) != nil {
+        return nil, fmt.Errorf("持仓响应解析失败")
+    }
+    return resp, nil
+}
+
+// GetRawOpenOrders 返回 OKX /api/v5/trade/orders-pending 的原始响应（可选 instId）
+func (t *OKXTrader) GetRawOpenOrders(instId string) (map[string]interface{}, error) {
+    q := map[string]string{}
+    if strings.TrimSpace(instId) != "" {
+        q["instId"] = instId
+    }
+    body, err := t.doRequest("GET", "/api/v5/trade/orders-pending", q)
+    if err != nil {
+        return nil, err
+    }
+    var resp map[string]interface{}
+    if json.Unmarshal(body, &resp) != nil {
+        return nil, fmt.Errorf("挂单响应解析失败")
+    }
+    return resp, nil
+}
+
 // GetBalance 获取账户余额
 // 映射到系统统一字段：totalWalletBalance, availableBalance, totalUnrealizedProfit
 func (t *OKXTrader) GetBalance() (map[string]interface{}, error) {
@@ -311,24 +355,45 @@ func (t *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
 // CloseLong 平多仓（reduceOnly市价单）
 func (t *OKXTrader) CloseLong(symbol string, quantity float64) (map[string]interface{}, error) {
     instId := toOKXInstID(symbol)
-    // 数量为0时，自动查询当前多仓数量
+    // 数量为0时，自动查询当前多仓数量，并根据持仓的保证金模式设置 tdMode
+    tdMode := "cross"
+    posSide := "long"
     if quantity == 0 {
-        positions, _ := t.GetPositions()
-        for _, p := range positions {
-            if p["symbol"] == instId && p["side"] == "long" {
-                if v, ok := p["positionAmt"].(float64); ok { quantity = v }
-                break
+        raw, err := t.GetRawPositions()
+        if err == nil && raw != nil {
+            data, _ := raw["data"].([]interface{})
+            for _, it := range data {
+                m, _ := it.(map[string]interface{})
+                if m["instId"] == instId {
+                    side, _ := m["posSide"].(string)
+                    if strings.ToLower(side) != "long" {
+                        continue
+                    }
+                    qty := parseStringFloat(m["pos"])
+                    if qty > 0 {
+                        quantity = qty
+                        posSide = side
+                        if mm, _ := m["mgnMode"].(string); mm != "" {
+                            if strings.ToLower(mm) == "isolated" { tdMode = "isolated" } else { tdMode = "cross" }
+                        }
+                        break
+                    }
+                }
             }
         }
         if quantity == 0 { return nil, fmt.Errorf("没有找到 %s 的多仓", instId) }
     }
     params := map[string]interface{}{
         "instId":     instId,
-        "tdMode":     "cross",
+        "tdMode":     tdMode,
         "side":       "sell",
         "ordType":    "market",
         "sz":         formatSize(quantity),
-        "reduceOnly": true,
+        "reduceOnly": "true",
+    }
+    // 仅在对冲模式下传递 posSide；净持仓模式应省略
+    if strings.ToLower(posSide) == "long" || strings.ToLower(posSide) == "short" {
+        params["posSide"] = "long"
     }
     body, err := t.doRequestJSON("POST", "/api/v5/trade/order", nil, params)
     if err != nil { return nil, err }
@@ -338,23 +403,43 @@ func (t *OKXTrader) CloseLong(symbol string, quantity float64) (map[string]inter
 // CloseShort 平空仓（reduceOnly市价单）
 func (t *OKXTrader) CloseShort(symbol string, quantity float64) (map[string]interface{}, error) {
     instId := toOKXInstID(symbol)
+    tdMode := "cross"
+    posSide := "short"
     if quantity == 0 {
-        positions, _ := t.GetPositions()
-        for _, p := range positions {
-            if p["symbol"] == instId && p["side"] == "short" {
-                if v, ok := p["positionAmt"].(float64); ok { quantity = v }
-                break
+        raw, err := t.GetRawPositions()
+        if err == nil && raw != nil {
+            data, _ := raw["data"].([]interface{})
+            for _, it := range data {
+                m, _ := it.(map[string]interface{})
+                if m["instId"] == instId {
+                    side, _ := m["posSide"].(string)
+                    if strings.ToLower(side) != "short" {
+                        continue
+                    }
+                    qty := parseStringFloat(m["pos"])
+                    if qty > 0 {
+                        quantity = qty
+                        posSide = side
+                        if mm, _ := m["mgnMode"].(string); mm != "" {
+                            if strings.ToLower(mm) == "isolated" { tdMode = "isolated" } else { tdMode = "cross" }
+                        }
+                        break
+                    }
+                }
             }
         }
         if quantity == 0 { return nil, fmt.Errorf("没有找到 %s 的空仓", instId) }
     }
     params := map[string]interface{}{
         "instId":     instId,
-        "tdMode":     "cross",
+        "tdMode":     tdMode,
         "side":       "buy",
         "ordType":    "market",
         "sz":         formatSize(quantity),
-        "reduceOnly": true,
+        "reduceOnly": "true",
+    }
+    if strings.ToLower(posSide) == "long" || strings.ToLower(posSide) == "short" {
+        params["posSide"] = "short"
     }
     body, err := t.doRequestJSON("POST", "/api/v5/trade/order", nil, params)
     if err != nil { return nil, err }
@@ -364,10 +449,32 @@ func (t *OKXTrader) CloseShort(symbol string, quantity float64) (map[string]inte
 // SetLeverage 设置杠杆（官方私有API）
 func (t *OKXTrader) SetLeverage(symbol string, leverage int) error {
     instId := toOKXInstID(symbol)
+    // 默认 cross；若存在该合约持仓，则依持仓的保证金模式与posSide设置
+    mgnMode := "cross"
+    posSide := ""
+    if raw, err := t.GetRawPositions(); err == nil && raw != nil {
+        if data, ok := raw["data"].([]interface{}); ok {
+            for _, it := range data {
+                m, _ := it.(map[string]interface{})
+                if m["instId"] == instId {
+                    if mm, _ := m["mgnMode"].(string); mm != "" {
+                        mgnMode = strings.ToLower(mm)
+                    }
+                    ps, _ := m["posSide"].(string)
+                    posSide = strings.ToLower(ps)
+                    break
+                }
+            }
+        }
+    }
     params := map[string]interface{}{
         "instId": instId,
-        "mgnMode": "cross",
+        "mgnMode": mgnMode,
         "lever":  fmt.Sprintf("%d", leverage),
+    }
+    // 在 isolated + 对冲模式下，OKX要求传入 posSide（long/short）；净持仓不传
+    if mgnMode == "isolated" && (posSide == "long" || posSide == "short") {
+        params["posSide"] = posSide
     }
     body, err := t.doRequestJSON("POST", "/api/v5/account/set-leverage", nil, params)
     if err != nil { return err }

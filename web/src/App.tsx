@@ -64,7 +64,7 @@ function App() {
   }, [traders, selectedTraderId]);
 
   // 如果在trader页面，获取该trader的数据
-  const { data: status } = useSWR<SystemStatus>(
+  const { data: status, mutate: mutateStatus } = useSWR<SystemStatus>(
     currentPage === 'trader' && selectedTraderId
       ? `status-${selectedTraderId}`
       : null,
@@ -73,6 +73,17 @@ function App() {
       refreshInterval: 15000, // 15秒刷新（配合后端15秒缓存）
       revalidateOnFocus: false, // 禁用聚焦时重新验证，减少请求
       dedupingInterval: 10000, // 10秒去重，防止短时间内重复请求
+    }
+  );
+
+  // 独立轮询执行开关状态（更快同步UI），避免受状态接口缓存影响
+  const { data: execution, mutate: mutateExecution } = useSWR<{ execution_enabled: boolean }>(
+    currentPage === 'trader' && selectedTraderId ? `execution-${selectedTraderId}` : null,
+    () => api.getExecutionStatus(selectedTraderId),
+    {
+      refreshInterval: 5000,
+      revalidateOnFocus: false,
+      dedupingInterval: 3000,
     }
   );
 
@@ -157,29 +168,31 @@ function App() {
 
             {/* Right: Controls - Wrap on mobile */}
             <div className="flex items-center gap-2 flex-wrap md:flex-nowrap">
-              {/* GitHub Link - Hidden on mobile, icon only on tablet */}
-              <a
-                href="https://github.com/tinkle-community/nofx"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="hidden sm:flex items-center gap-2 px-2 md:px-3 py-1.5 md:py-2 rounded text-sm font-semibold transition-all hover:scale-105"
-                style={{ background: '#1E2329', color: '#848E9C', border: '1px solid #2B3139' }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = '#2B3139';
-                  e.currentTarget.style.color = '#EAECEF';
-                  e.currentTarget.style.borderColor = '#F0B90B';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = '#1E2329';
-                  e.currentTarget.style.color = '#848E9C';
-                  e.currentTarget.style.borderColor = '#2B3139';
-                }}
-              >
-                <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
-                </svg>
-                <span className="hidden md:inline">GitHub</span>
-              </a>
+              {/* Execution Toggle - show on trader page when status is available */}
+              {currentPage === 'trader' && (execution || status) && (
+                <button
+                  onClick={async () => {
+                    const current = execution?.execution_enabled ?? status?.execution_enabled ?? false;
+                    const next = !current;
+                    try {
+                      await api.setExecution(next, selectedTraderId);
+                      // 即时更新UI中的状态，不等待下一次轮询
+                      mutateExecution({ execution_enabled: next }, false);
+                      mutateStatus((prev) => prev ? { ...prev, execution_enabled: next } : prev, false);
+                    } catch (e) {
+                      console.error(e);
+                    }
+                  }}
+                  className="flex items-center gap-2 px-2 md:px-3 py-1.5 md:py-2 rounded text-sm font-semibold transition-all hover:scale-105"
+                  style={(execution?.execution_enabled ?? status?.execution_enabled)
+                    ? { background: 'rgba(14, 203, 129, 0.1)', color: '#0ECB81', border: '1px solid #2B3139' }
+                    : { background: 'rgba(246, 70, 93, 0.1)', color: '#F6465D', border: '1px solid #2B3139' }
+                  }
+                >
+                  <span>⚙️ {t('autoExecute', language)}</span>
+                  <span className="hidden md:inline">{t((execution?.execution_enabled ?? status?.execution_enabled) ? 'enabled' : 'disabled', language)}</span>
+                </button>
+              )}
 
               {/* Language Toggle */}
               <div className="flex gap-0.5 sm:gap-1 rounded p-0.5 sm:p-1" style={{ background: '#1E2329' }}>
@@ -291,30 +304,6 @@ function App() {
         <div className="max-w-[1920px] mx-auto px-6 py-6 text-center text-sm" style={{ color: '#5E6673' }}>
           <p>{t('footerTitle', language)}</p>
           <p className="mt-1">{t('footerWarning', language)}</p>
-          <div className="mt-4 flex items-center justify-center gap-2">
-            <a
-              href="https://github.com/tinkle-community/nofx"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 px-4 py-2 rounded text-sm font-semibold transition-all hover:scale-105"
-              style={{ background: '#1E2329', color: '#848E9C', border: '1px solid #2B3139' }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = '#2B3139';
-                e.currentTarget.style.color = '#EAECEF';
-                e.currentTarget.style.borderColor = '#F0B90B';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = '#1E2329';
-                e.currentTarget.style.color = '#848E9C';
-                e.currentTarget.style.borderColor = '#2B3139';
-              }}
-            >
-              <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor">
-                <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
-              </svg>
-              <span>Star on GitHub</span>
-            </a>
-          </div>
         </div>
       </footer>
     </div>
@@ -340,6 +329,22 @@ function TraderDetailsPage({
   lastUpdate: string;
   language: Language;
 }) {
+  const [analysisEnabled, setAnalysisEnabled] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('analysisEnabled');
+      return saved ? saved === 'true' : false;
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleAnalysis = () => {
+    setAnalysisEnabled(prev => {
+      const next = !prev;
+      try { localStorage.setItem('analysisEnabled', String(next)); } catch {}
+      return next;
+    });
+  };
   if (!selectedTrader) {
     return (
       <div className="space-y-6">
@@ -517,28 +522,42 @@ function TraderDetailsPage({
         {/* 右侧：Recent Decisions - 卡片容器 */}
         <div className="binance-card p-6 animate-slide-in h-fit lg:sticky lg:top-24 lg:max-h-[calc(100vh-120px)]" style={{ animationDelay: '0.2s' }}>
           {/* 标题 */}
-          <div className="flex items-center gap-3 mb-5 pb-4 border-b" style={{ borderColor: '#2B3139' }}>
-            <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl" style={{
-              background: 'linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%)',
-              boxShadow: '0 4px 14px rgba(99, 102, 241, 0.4)'
-            }}>
-              🧠
+          <div className="flex items-center justify-between mb-5 pb-4 border-b" style={{ borderColor: '#2B3139' }}>
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center text-xl" style={{
+                background: 'linear-gradient(135deg, #6366F1 0%, #8B5CF6 100%)',
+                boxShadow: '0 4px 14px rgba(99, 102, 241, 0.4)'
+              }}>
+                🧠
+              </div>
+              <div>
+                <h2 className="text-xl font-bold" style={{ color: '#EAECEF' }}>{t('recentDecisions', language)}</h2>
+                {decisions && decisions.length > 0 && (
+                  <div className="text-xs" style={{ color: '#848E9C' }}>
+                    {t('lastCycles', language, { count: decisions.length })}
+                  </div>
+                )}
+              </div>
             </div>
-            <div>
-              <h2 className="text-xl font-bold" style={{ color: '#EAECEF' }}>{t('recentDecisions', language)}</h2>
-              {decisions && decisions.length > 0 && (
-                <div className="text-xs" style={{ color: '#848E9C' }}>
-                  {t('lastCycles', language, { count: decisions.length })}
-                </div>
-              )}
-            </div>
+            {/* AI辅助分析开关 */}
+            <button
+              onClick={toggleAnalysis}
+              className="flex items-center gap-2 px-3 py-2 rounded text-xs sm:text-sm font-semibold transition-all hover:scale-105"
+              style={analysisEnabled
+                ? { background: 'rgba(14, 203, 129, 0.1)', color: '#0ECB81', border: '1px solid #2B3139' }
+                : { background: 'rgba(246, 70, 93, 0.1)', color: '#F6465D', border: '1px solid #2B3139' }
+              }
+            >
+              <span>🧠 AI辅助分析</span>
+              <span className="hidden md:inline">{analysisEnabled ? t('enabled', language) : t('disabled', language)}</span>
+            </button>
           </div>
 
           {/* 决策列表 - 可滚动 */}
           <div className="space-y-4 overflow-y-auto pr-2" style={{ maxHeight: 'calc(100vh - 280px)' }}>
             {decisions && decisions.length > 0 ? (
               decisions.map((decision, i) => (
-                <DecisionCard key={i} decision={decision} language={language} />
+                <DecisionCard key={i} decision={decision} language={language} analysisEnabled={analysisEnabled} />
               ))
             ) : (
               <div className="py-16 text-center">
@@ -595,9 +614,14 @@ function StatCard({
 }
 
 // Decision Card Component with CoT Trace - Binance Style
-function DecisionCard({ decision, language }: { decision: DecisionRecord; language: Language }) {
-  const [showInputPrompt, setShowInputPrompt] = useState(false);
-  const [showCoT, setShowCoT] = useState(false);
+function DecisionCard({ decision, language, analysisEnabled }: { decision: DecisionRecord; language: Language; analysisEnabled?: boolean }) {
+  const [showInputPrompt, setShowInputPrompt] = useState<boolean>(!!analysisEnabled);
+  const [showCoT, setShowCoT] = useState<boolean>(!!analysisEnabled);
+
+  useEffect(() => {
+    setShowInputPrompt(!!analysisEnabled);
+    setShowCoT(!!analysisEnabled);
+  }, [analysisEnabled]);
 
   return (
     <div className="rounded p-5 transition-all duration-300 hover:translate-y-[-2px]" style={{ border: '1px solid #2B3139', background: '#1E2329', boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)' }}>

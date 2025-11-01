@@ -9,6 +9,10 @@ export const translations = {
     details: 'Details',
     running: 'RUNNING',
     stopped: 'STOPPED',
+    // Execution Toggle
+    autoExecute: 'Auto-Execute',
+    enabled: 'ENABLED',
+    disabled: 'DISABLED',
 
     // Footer
     footerTitle: 'NOFX - AI Trading Competition System',
@@ -127,6 +131,10 @@ export const translations = {
     details: '详情',
     running: '运行中',
     stopped: '已停止',
+    // Execution Toggle
+    autoExecute: '自动执行',
+    enabled: '已启用',
+    disabled: '已禁用',
 
     // Footer
     footerTitle: 'NOFX - AI交易竞赛系统',

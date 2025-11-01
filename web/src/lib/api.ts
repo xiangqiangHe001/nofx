@@ -110,4 +110,63 @@ export const api = {
     if (!res.ok) throw new Error('获取AI学习数据失败');
     return res.json();
   },
+
+  // 获取自动执行开关状态
+  async getExecutionStatus(traderId?: string): Promise<{ execution_enabled: boolean }> {
+    const url = traderId
+      ? `${API_BASE}/execution?trader_id=${traderId}`
+      : `${API_BASE}/execution`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('获取执行开关状态失败');
+    return res.json();
+  },
+
+  // 设置自动执行开关
+  async setExecution(enabled: boolean, traderId?: string): Promise<{ execution_enabled: boolean }> {
+    const url = traderId
+      ? `${API_BASE}/execution?trader_id=${traderId}`
+      : `${API_BASE}/execution`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+    if (!res.ok) throw new Error('设置执行开关失败');
+    return res.json();
+  },
+
+  // OKX 原始数据接口（按需使用）
+  async getOkxAccountRaw(traderId?: string): Promise<any> {
+    const url = traderId
+      ? `${API_BASE}/okx/account/raw?trader_id=${traderId}`
+      : `${API_BASE}/okx/account/raw`;
+    const res = await fetch(url, {
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache' },
+    });
+    if (!res.ok) throw new Error('获取 OKX 原始账户数据失败');
+    return res.json();
+  },
+
+  async getOkxPositionsRaw(traderId?: string): Promise<any> {
+    const url = traderId
+      ? `${API_BASE}/okx/positions/raw?trader_id=${traderId}`
+      : `${API_BASE}/okx/positions/raw`;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('获取 OKX 原始持仓数据失败');
+    return res.json();
+  },
+
+  async getOkxOrders(instId?: string, traderId?: string): Promise<any> {
+    const params = new URLSearchParams();
+    if (instId) params.set('instId', instId);
+    if (traderId) params.set('trader_id', traderId);
+    const query = params.toString();
+    const url = query
+      ? `${API_BASE}/okx/orders?${query}`
+      : `${API_BASE}/okx/orders`;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('获取 OKX 原始委托数据失败');
+    return res.json();
+  },
 };

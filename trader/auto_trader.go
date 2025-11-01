@@ -88,6 +88,9 @@ type AutoTrader struct {
     aiClient        *mcp.Client
     btcethLeverage  int
     altcoinLeverage int
+
+    // 执行控制
+    executionEnabled bool
 }
 
 // NewAutoTrader 创建自动交易器
@@ -174,6 +177,17 @@ func (a *AutoTrader) GetAIModel() string { return a.aiModel }
 // 决策日志器
 func (a *AutoTrader) GetDecisionLogger() *logger.DecisionLogger { return a.decisionLogger }
 
+// GetOKXClient 如果当前交易所是 OKX，返回底层 OKXTrader 客户端；否则返回nil
+func (a *AutoTrader) GetOKXClient() *OKXTrader {
+    if strings.ToLower(a.exchange) != "okx" {
+        return nil
+    }
+    if cl, ok := a.client.(*OKXTrader); ok {
+        return cl
+    }
+    return nil
+}
+
 // 运行
 func (a *AutoTrader) Run() error {
     if a.isRunning {
@@ -227,11 +241,172 @@ func (a *AutoTrader) GetStatus() map[string]interface{} {
         "stop_until":      stopUntil,
         "last_reset_time": a.lastReset.Format(time.RFC3339),
         "ai_provider":     a.aiModel,
+        "execution_enabled": a.executionEnabled,
     }
 }
 
+// SetExecutionEnabled 设置是否启用自动执行（仅记录建议时仍保留周期分析与日志）
+func (a *AutoTrader) SetExecutionEnabled(enabled bool) { a.executionEnabled = enabled }
+// IsExecutionEnabled 获取自动执行开关状态
+func (a *AutoTrader) IsExecutionEnabled() bool { return a.executionEnabled }
+
 // 账户信息聚合
 func (a *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
+    // 如果是 OKX，优先使用 OKX 原始私有接口数据对齐 yuanbao.py
+    if okx := a.GetOKXClient(); okx != nil {
+        rawAcc, err := okx.GetRawAccountBalance()
+        if err != nil {
+            // 回退到通用路径
+        } else if code, _ := rawAcc["code"].(string); code == "0" {
+            dataList, _ := rawAcc["data"].([]interface{})
+            if len(dataList) > 0 {
+                first, _ := dataList[0].(map[string]interface{})
+
+                // totalEq 为账户总净值（Total Equity）
+                totalEquity := 0.0
+                if s, ok := first["totalEq"].(string); ok {
+                    if f, e := strconvParseFloat(s); e == nil { totalEquity = f }
+                }
+
+                // 可用余额：优先使用顶层 availEq；否则从 USDT details.availBal 提取
+                availableBalance := 0.0
+                if s, ok := first["availEq"].(string); ok {
+                    if f, e := strconvParseFloat(s); e == nil { availableBalance = f }
+                } else if details, ok := first["details"].([]interface{}); ok {
+                    for _, d := range details {
+                        dm, _ := d.(map[string]interface{})
+                        if dm["ccy"] == "USDT" {
+                            if s2, ok2 := dm["availBal"].(string); ok2 {
+                                if f2, e2 := strconvParseFloat(s2); e2 == nil { availableBalance = f2 }
+                            }
+                            // 若USDT的availBal缺失，尝试cashBal作为可用余额近似
+                            if availableBalance <= 0 {
+                                if s3, ok3 := dm["cashBal"].(string); ok3 {
+                                    if f3, e3 := strconvParseFloat(s3); e3 == nil { availableBalance = f3 }
+                                }
+                            }
+                            break
+                        }
+                    }
+                    // 若未找到USDT或其可用余额为0，求和所有币种的availBal作为总体可用近似
+                    if availableBalance <= 0 {
+                        sumAvail := 0.0
+                        for _, d := range details {
+                            dm, _ := d.(map[string]interface{})
+                            if s2, ok2 := dm["availBal"].(string); ok2 {
+                                if f2, e2 := strconvParseFloat(s2); e2 == nil { sumAvail += f2 }
+                            }
+                        }
+                        if sumAvail > 0 { availableBalance = sumAvail }
+                    }
+                }
+                
+                // 进一步回退：若可用余额仍为0，使用统一余额接口回退
+                if availableBalance <= 0 {
+                    if balMap, err := okx.GetBalance(); err == nil && balMap != nil {
+                        if v := getFloat(balMap, "availableBalance"); v > 0 {
+                            availableBalance = v
+                        }
+                    }
+                }
+
+                // 未实现盈亏：从原始持仓 upl 字段汇总，仅统计非零持仓
+                unrealizedProfit := 0.0
+                rawPos, err := okx.GetRawPositions()
+                positionCount := 0
+                if err == nil {
+                    if code2, _ := rawPos["code"].(string); code2 == "0" {
+                        if posList, ok := rawPos["data"].([]interface{}); ok {
+                            for _, it := range posList {
+                                pm, _ := it.(map[string]interface{})
+                                // 过滤零持仓
+                                posStr, _ := pm["pos"].(string)
+                                posQty := 0.0
+                                if f, e := strconvParseFloat(posStr); e == nil { posQty = f }
+                                if math.Abs(posQty) <= 0 { continue }
+                                positionCount++
+                                if uplStr, ok := pm["upl"].(string); ok {
+                                    if f, e := strconvParseFloat(uplStr); e == nil {
+                                        unrealizedProfit += f
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 钱包余额：优先使用USDT的cashBal；否则近似为 Equity - 未实现盈亏
+                walletBalance := totalEquity - unrealizedProfit
+                if details, ok := first["details"].([]interface{}); ok {
+                    for _, d := range details {
+                        dm, _ := d.(map[string]interface{})
+                        if dm["ccy"] == "USDT" {
+                            if s2, ok2 := dm["cashBal"].(string); ok2 {
+                                if f2, e2 := strconvParseFloat(s2); e2 == nil { walletBalance = f2 }
+                            }
+                            break
+                        }
+                    }
+                }
+                // 回退：若钱包余额仍为0，使用统一余额接口回退
+                if walletBalance <= 0 {
+                    if balMap, err := okx.GetBalance(); err == nil && balMap != nil {
+                        if v := getFloat(balMap, "totalWalletBalance"); v > 0 {
+                            walletBalance = v
+                        }
+                    }
+                }
+
+                // 保证金占用：优先使用顶层 imr；否则按持仓计算（名义价值/杠杆）
+                marginUsed := 0.0
+                if s, ok := first["imr"].(string); ok {
+                    if f, e := strconvParseFloat(s); e == nil { marginUsed = f }
+                }
+                if marginUsed == 0 {
+                    // 使用标准化持仓计算保证金
+                    positionsNorm, err := a.client.GetPositions()
+                    if err == nil {
+                        for _, p := range positionsNorm {
+                            qty := getFloat(p, "positionAmt")
+                            entry := getFloat(p, "entryPrice")
+                            lev := getFloat(p, "leverage")
+                            if qty > 0 && entry > 0 && lev > 0 {
+                                positionValue := qty * entry
+                                marginUsed += positionValue / lev
+                            }
+                        }
+                    }
+                }
+
+                totalPnL := totalEquity - a.initialBalance
+                totalPnLPct := 0.0
+                if a.initialBalance > 0 {
+                    totalPnLPct = (totalPnL / a.initialBalance) * 100
+                }
+                marginUsedPct := 0.0
+                if totalEquity > 0 {
+                    marginUsedPct = (marginUsed / totalEquity) * 100
+                }
+
+                return map[string]interface{}{
+                    "total_equity":         round2(totalEquity),
+                    "wallet_balance":       round2(walletBalance),
+                    "unrealized_profit":    round2(unrealizedProfit),
+                    "available_balance":    round2(availableBalance),
+                    "total_pnl":            round2(totalPnL),
+                    "total_pnl_pct":        round2(totalPnLPct),
+                    "total_unrealized_pnl": round2(unrealizedProfit),
+                    "initial_balance":      round2(a.initialBalance),
+                    "daily_pnl":            0.0,
+                    "position_count":       positionCount,
+                    "margin_used":          round2(marginUsed),
+                    "margin_used_pct":      round2(marginUsedPct),
+                }, nil
+            }
+        }
+    }
+
+    // 通用路径（非OKX或OKX原始数据不可用时）
     bal, err := a.client.GetBalance()
     if err != nil {
         return nil, err
@@ -494,7 +669,12 @@ func (a *AutoTrader) runDecisionCycle() {
     record.InputPrompt = fullDecision.UserPrompt
     record.CoTTrace = fullDecision.CoTTrace
     record.DecisionJSON = string(decBytes)
-    record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("AI生成%d条决策；当前版本仅记录不执行", len(fullDecision.Decisions)))
+    if !a.executionEnabled {
+        record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("AI生成%d条决策；自动执行已禁用，本周期仅分析并记录", len(fullDecision.Decisions)))
+    } else {
+        // 目前未接入真实下单路径，保留提示与日志结构
+        record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("AI生成%d条决策；自动执行已启用（当前实现未下单，仅记录建议）", len(fullDecision.Decisions)))
+    }
 
     if err := a.decisionLogger.LogDecision(record); err != nil {
         log.Printf("⚠️ 记录决策失败: %v", err)

@@ -59,6 +59,17 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Remove GitHub anchor modules globally */
+/* Hide any anchor linking to tinkle-community/nofx on all pages */
+a[href*="github.com/tinkle-community/nofx"] {
+  display: none !important;
+}
+/* Also ensure child svg and span of the target anchors are hidden */
+a[href*="github.com/tinkle-community/nofx"] svg,
+a[href*="github.com/tinkle-community/nofx"] span {
+  display: none !important;
+}
+
 body {
   margin: 0;
   min-width: 320px;

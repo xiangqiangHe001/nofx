@@ -11,6 +11,7 @@ export interface SystemStatus {
   stop_until: string;
   last_reset_time: string;
   ai_provider: string;
+  execution_enabled: boolean;
 }
 
 export interface AccountInfo {

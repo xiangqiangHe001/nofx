@@ -1,12 +1,13 @@
 package api
 
 import (
-	"fmt"
-	"log"
-	"net/http"
-	"nofx/manager"
+    "fmt"
+    "log"
+    "net/http"
+    "nofx/manager"
+    "strings"
 
-	"github.com/gin-gonic/gin"
+    "github.com/gin-gonic/gin"
 )
 
 // Server HTTP API服务器
@@ -77,6 +78,19 @@ func (s *Server) setupRoutes() {
 		api.GET("/statistics", s.handleStatistics)
 		api.GET("/equity-history", s.handleEquityHistory)
 		api.GET("/performance", s.handlePerformance)
+
+		// 执行开关（预测/自动执行）
+		api.GET("/execution", s.handleExecutionStatus)
+		api.POST("/execution", s.handleSetExecution)
+
+		// OKX 原始数据接口（参考 yuanbao.py 数据来源）
+		api.GET("/okx/account/raw", s.handleOKXAccountRaw)
+		api.GET("/okx/positions/raw", s.handleOKXPositionsRaw)
+		api.GET("/okx/orders", s.handleOKXOrders)
+
+		// 操作类接口：设置杠杆、平仓
+		api.POST("/okx/leverage", s.handleOKXSetLeverage)
+		api.POST("/okx/close", s.handleOKXClosePosition)
 	}
 }
 
@@ -399,6 +413,172 @@ func (s *Server) handlePerformance(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, performance)
+}
+
+// handleExecutionStatus 获取自动执行开关状态
+func (s *Server) handleExecutionStatus(c *gin.Context) {
+    _, traderID, err := s.getTraderFromQuery(c)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+
+    trader, err := s.traderManager.GetTrader(traderID)
+    if err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{"execution_enabled": trader.IsExecutionEnabled()})
+}
+
+// handleSetExecution 设置自动执行开关
+func (s *Server) handleSetExecution(c *gin.Context) {
+    _, traderID, err := s.getTraderFromQuery(c)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+
+    trader, err := s.traderManager.GetTrader(traderID)
+    if err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+        return
+    }
+
+    var body struct {
+        Enabled bool `json:"enabled"`
+    }
+    if err := c.ShouldBindJSON(&body); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "请求体格式错误"})
+        return
+    }
+
+    trader.SetExecutionEnabled(body.Enabled)
+    c.JSON(http.StatusOK, gin.H{"execution_enabled": trader.IsExecutionEnabled()})
+}
+
+// handleOKXAccountRaw 返回 OKX 原始账户余额响应
+func (s *Server) handleOKXAccountRaw(c *gin.Context) {
+    _, traderID, err := s.getTraderFromQuery(c)
+    if err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}); return }
+    at, err := s.traderManager.GetTrader(traderID)
+    if err != nil { c.JSON(http.StatusNotFound, gin.H{"error": err.Error()}); return }
+    okx := at.GetOKXClient()
+    if okx == nil { c.JSON(http.StatusBadRequest, gin.H{"error": "当前trader不是OKX或未初始化"}); return }
+    resp, err := okx.GetRawAccountBalance()
+    if err != nil { c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取OKX账户余额失败: %v", err)}); return }
+    c.JSON(http.StatusOK, resp)
+}
+
+// handleOKXPositionsRaw 返回 OKX 原始持仓响应
+func (s *Server) handleOKXPositionsRaw(c *gin.Context) {
+    _, traderID, err := s.getTraderFromQuery(c)
+    if err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}); return }
+    at, err := s.traderManager.GetTrader(traderID)
+    if err != nil { c.JSON(http.StatusNotFound, gin.H{"error": err.Error()}); return }
+    okx := at.GetOKXClient()
+    if okx == nil { c.JSON(http.StatusBadRequest, gin.H{"error": "当前trader不是OKX或未初始化"}); return }
+    resp, err := okx.GetRawPositions()
+    if err != nil { c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取OKX持仓失败: %v", err)}); return }
+    c.JSON(http.StatusOK, resp)
+}
+
+// handleOKXOrders 返回 OKX 未成交订单（可选 instId）
+func (s *Server) handleOKXOrders(c *gin.Context) {
+    _, traderID, err := s.getTraderFromQuery(c)
+    if err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}); return }
+    at, err := s.traderManager.GetTrader(traderID)
+    if err != nil { c.JSON(http.StatusNotFound, gin.H{"error": err.Error()}); return }
+    okx := at.GetOKXClient()
+    if okx == nil { c.JSON(http.StatusBadRequest, gin.H{"error": "当前trader不是OKX或未初始化"}); return }
+    instId := c.Query("instId")
+    resp, err := okx.GetRawOpenOrders(instId)
+    if err != nil { c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取OKX挂单失败: %v", err)}); return }
+    c.JSON(http.StatusOK, resp)
+}
+
+// handleOKXSetLeverage 设置杠杆（支持指定symbol或对所有持仓生效）
+func (s *Server) handleOKXSetLeverage(c *gin.Context) {
+    _, traderID, err := s.getTraderFromQuery(c)
+    if err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}); return }
+    at, err := s.traderManager.GetTrader(traderID)
+    if err != nil { c.JSON(http.StatusNotFound, gin.H{"error": err.Error()}); return }
+    okx := at.GetOKXClient()
+    if okx == nil { c.JSON(http.StatusBadRequest, gin.H{"error": "当前trader不是OKX或未初始化"}); return }
+
+    var body struct {
+        Leverage int    `json:"leverage"`
+        Symbol   string `json:"symbol"`
+    }
+    if err := c.ShouldBindJSON(&body); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "请求体格式错误"}); return
+    }
+    if body.Leverage <= 0 { c.JSON(http.StatusBadRequest, gin.H{"error": "leverage必须为正整数"}); return }
+
+    // 如果指定了symbol，仅设置该symbol
+    if strings.TrimSpace(body.Symbol) != "" {
+        if err := okx.SetLeverage(body.Symbol, body.Leverage); err != nil {
+            c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("设置杠杆失败: %v", err)}); return
+        }
+        c.JSON(http.StatusOK, gin.H{"success": true, "leverage": body.Leverage, "symbols": []string{body.Symbol}})
+        return
+    }
+
+    // 未指定symbol，则对所有当前有持仓的合约设置杠杆
+    positions, err := okx.GetPositions()
+    if err != nil { c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取持仓失败: %v", err)}); return }
+    setSymbols := []string{}
+    errorsList := []string{}
+    seen := map[string]bool{}
+    for _, p := range positions {
+        sym, _ := p["symbol"].(string)
+        if sym == "" || seen[sym] { continue }
+        seen[sym] = true
+        if err := okx.SetLeverage(sym, body.Leverage); err != nil {
+            errorsList = append(errorsList, fmt.Sprintf("%s: %v", sym, err))
+        } else {
+            setSymbols = append(setSymbols, sym)
+        }
+    }
+    if len(setSymbols) == 0 && len(errorsList) > 0 {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("全部设置失败: %v", errorsList)})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"success": true, "leverage": body.Leverage, "symbols": setSymbols, "errors": errorsList})
+}
+
+// handleOKXClosePosition 平仓（reduceOnly市价单），支持long/short，数量为0则全平
+func (s *Server) handleOKXClosePosition(c *gin.Context) {
+    _, traderID, err := s.getTraderFromQuery(c)
+    if err != nil { c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()}); return }
+    at, err := s.traderManager.GetTrader(traderID)
+    if err != nil { c.JSON(http.StatusNotFound, gin.H{"error": err.Error()}); return }
+    okx := at.GetOKXClient()
+    if okx == nil { c.JSON(http.StatusBadRequest, gin.H{"error": "当前trader不是OKX或未初始化"}); return }
+
+    var body struct {
+        Symbol string  `json:"symbol"`
+        Side   string  `json:"side"`   // long 或 short
+        Size   float64 `json:"size"`   // 可选，0表示全平
+    }
+    if err := c.ShouldBindJSON(&body); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "请求体格式错误"}); return
+    }
+    if strings.TrimSpace(body.Symbol) == "" { c.JSON(http.StatusBadRequest, gin.H{"error": "symbol不能为空"}); return }
+    side := strings.ToLower(strings.TrimSpace(body.Side))
+    if side != "long" && side != "short" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "side必须为long或short"}); return
+    }
+
+    var resp map[string]interface{}
+    if side == "long" {
+        resp, err = okx.CloseLong(body.Symbol, body.Size)
+    } else {
+        resp, err = okx.CloseShort(body.Symbol, body.Size)
+    }
+    if err != nil { c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("平仓失败: %v", err)}); return }
+    c.JSON(http.StatusOK, resp)
 }
 
 // Start 启动服务器
