@@ -1,692 +1,1035 @@
 package trader
 
 import (
-    "encoding/json"
-    "fmt"
-    "log"
-    "math"
-    "strconv"
-    "strings"
-    "time"
-
-    "nofx/decision"
-    "nofx/logger"
-    "nofx/mcp"
-    "nofx/pool"
+	"encoding/json"
+	"fmt"
+	"log"
+	"nofx/decision"
+	"nofx/logger"
+	"nofx/market"
+	"nofx/mcp"
+	"nofx/pool"
+	"strings"
+	"time"
 )
 
-// AutoTraderConfig 自动交易器配置（与 manager.TraderManager 构造保持一致）
+// AutoTraderConfig 自动交易配置（简化版 - AI全权决策）
 type AutoTraderConfig struct {
-    ID                    string
-    Name                  string
-    AIModel               string
-    Exchange              string
+	// Trader标识
+	ID      string // Trader唯一标识（用于日志目录等）
+	Name    string // Trader显示名称
+	AIModel string // AI模型: "qwen" 或 "deepseek"
 
-    // Binance
-    BinanceAPIKey    string
-    BinanceSecretKey string
+    // 交易平台选择
+    Exchange string // "binance", "hyperliquid", "aster" 或 "okx"
 
-    // Hyperliquid
+	// 币安API配置
+	BinanceAPIKey    string
+	BinanceSecretKey string
+
+    // Hyperliquid配置
     HyperliquidPrivateKey string
-    HyperliquidWalletAddr string
     HyperliquidTestnet    bool
 
-    // Aster
-    AsterUser       string
-    AsterSigner     string
-    AsterPrivateKey string
+    // Aster配置
+    AsterUser       string // Aster主钱包地址
+    AsterSigner     string // Aster API钱包地址
+    AsterPrivateKey string // Aster API钱包私钥
 
-    // OKX
-    OKXAPIKey     string
-    OKXSecretKey  string
+    // OKX配置
+    OKXAPIKey    string
+    OKXSecretKey string
     OKXPassphrase string
 
-    // AI Keys / Custom API
-    UseQwen         bool
-    DeepSeekKey     string
-    QwenKey         string
-    CustomAPIURL    string
-    CustomAPIKey    string
-    CustomModelName string
+	CoinPoolAPIURL string
 
-    // Runtime / Risk / Leverage
-    ScanInterval    time.Duration // 扫描周期，直接使用time.Duration
-    InitialBalance  float64
-    BTCETHLeverage  int
-    AltcoinLeverage int
-    MaxDailyLoss    float64
-    MaxDrawdown     float64
-    StopTradingTime time.Duration
+	// AI配置
+	UseQwen     bool
+	DeepSeekKey string
+	QwenKey     string
 
-    // External services
-    CoinPoolAPIURL string
+	// 自定义AI API配置
+	CustomAPIURL    string
+	CustomAPIKey    string
+	CustomModelName string
+
+	// 扫描配置
+	ScanInterval time.Duration // 扫描间隔（建议3分钟）
+
+	// 账户配置
+	InitialBalance float64 // 初始金额（用于计算盈亏，需手动设置）
+
+	// 杠杆配置
+	BTCETHLeverage  int // BTC和ETH的杠杆倍数
+	AltcoinLeverage int // 山寨币的杠杆倍数
+
+	// 风险控制（仅作为提示，AI可自主决定）
+	MaxDailyLoss    float64       // 最大日亏损百分比（提示）
+	MaxDrawdown     float64       // 最大回撤百分比（提示）
+    StopTradingTime time.Duration // 触发风控后暂停时长
+    DryRun          bool          // 是否 DryRun（演示模式，跳过真实下单）
 }
 
-// AutoTrader 自动交易器主体
+// AutoTrader 自动交易器
 type AutoTrader struct {
-    id       string
-    name     string
-    aiModel  string
-    exchange string
-
-    client Trader
-
-    decisionLogger *logger.DecisionLogger
-
-    // 运行状态
-    isRunning bool
-    startTime time.Time
-    lastReset time.Time
-    stopUntil time.Time
-    callCount int
-
-    // 资金与周期
-    initialBalance float64
-    scanInterval   time.Duration
-
-    // AI & leverage
-    aiClient        *mcp.Client
-    btcethLeverage  int
-    altcoinLeverage int
-
-    // 执行控制
-    executionEnabled bool
+	id                   string                 // Trader唯一标识
+	name                 string                 // Trader显示名称
+	aiModel              string                 // AI模型名称
+	exchange             string                 // 交易平台名称
+	config               AutoTraderConfig
+	trader               Trader                 // 使用Trader接口（支持多平台）
+	decisionLogger       *logger.DecisionLogger // 决策日志记录器
+	initialBalance       float64
+	dailyPnL             float64
+	lastResetTime        time.Time
+	stopUntil            time.Time
+	isRunning            bool
+	startTime            time.Time                 // 系统启动时间
+    callCount            int                       // AI调用次数
+    positionFirstSeenTime map[string]int64         // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
+    executionEnabled     bool                      // 是否启用自动执行
 }
 
 // NewAutoTrader 创建自动交易器
-func NewAutoTrader(cfg AutoTraderConfig) (*AutoTrader, error) {
-    if cfg.ID == "" || cfg.Name == "" {
-        return nil, fmt.Errorf("缺少ID或Name")
-    }
+func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
+	// 设置默认值
+	if config.ID == "" {
+		config.ID = "default_trader"
+	}
+	if config.Name == "" {
+		config.Name = "Default Trader"
+	}
+	if config.AIModel == "" {
+		if config.UseQwen {
+			config.AIModel = "qwen"
+		} else {
+			config.AIModel = "deepseek"
+		}
+	}
 
-    exch := strings.ToLower(strings.TrimSpace(cfg.Exchange))
-    if exch == "" {
-        exch = "binance"
-    }
+	// 初始化AI
+	if config.AIModel == "custom" {
+		// 使用自定义API
+		mcp.SetCustomAPI(config.CustomAPIURL, config.CustomAPIKey, config.CustomModelName)
+		log.Printf("🤖 [%s] 使用自定义AI API: %s (模型: %s)", config.Name, config.CustomAPIURL, config.CustomModelName)
+	} else if config.UseQwen || config.AIModel == "qwen" {
+		// 使用Qwen
+		mcp.SetQwenAPIKey(config.QwenKey, "")
+		log.Printf("🤖 [%s] 使用阿里云Qwen AI", config.Name)
+	} else {
+		// 默认使用DeepSeek
+		mcp.SetDeepSeekAPIKey(config.DeepSeekKey)
+		log.Printf("🤖 [%s] 使用DeepSeek AI", config.Name)
+	}
 
-    var client Trader
-    switch exch {
-    case "binance":
-        client = NewFuturesTrader(cfg.BinanceAPIKey, cfg.BinanceSecretKey)
-    case "hyperliquid":
-        cl, err := NewHyperliquidTrader(cfg.HyperliquidPrivateKey, cfg.HyperliquidWalletAddr, cfg.HyperliquidTestnet)
-        if err != nil {
-            return nil, err
-        }
-        client = cl
+	// 初始化币种池API
+	if config.CoinPoolAPIURL != "" {
+		pool.SetCoinPoolAPI(config.CoinPoolAPIURL)
+	}
+
+	// 设置默认交易平台
+	if config.Exchange == "" {
+		config.Exchange = "binance"
+	}
+
+	// 根据配置创建对应的交易器
+	var trader Trader
+	var err error
+
+switch config.Exchange {
+case "binance":
+		log.Printf("🏦 [%s] 使用币安合约交易", config.Name)
+		trader = NewFuturesTrader(config.BinanceAPIKey, config.BinanceSecretKey)
+	case "hyperliquid":
+		log.Printf("🏦 [%s] 使用Hyperliquid交易", config.Name)
+		trader, err = NewHyperliquidTrader(config.HyperliquidPrivateKey, config.HyperliquidTestnet)
+		if err != nil {
+			return nil, fmt.Errorf("初始化Hyperliquid交易器失败: %w", err)
+		}
     case "aster":
-        cl, err := NewAsterTrader(cfg.AsterUser, cfg.AsterSigner, cfg.AsterPrivateKey)
+        log.Printf("🏦 [%s] 使用Aster交易", config.Name)
+        trader, err = NewAsterTrader(config.AsterUser, config.AsterSigner, config.AsterPrivateKey)
         if err != nil {
-            return nil, err
+            return nil, fmt.Errorf("初始化Aster交易器失败: %w", err)
         }
-        client = cl
     case "okx":
-        cl, err := NewOKXTrader(cfg.OKXAPIKey, cfg.OKXSecretKey, cfg.OKXPassphrase)
+        log.Printf("🏦 [%s] 使用OKX永续合约交易", config.Name)
+        trader, err = NewOKXTrader(config.OKXAPIKey, config.OKXSecretKey, config.OKXPassphrase)
         if err != nil {
-            return nil, err
+            return nil, fmt.Errorf("初始化OKX交易器失败: %w", err)
         }
-        client = cl
     default:
-        return nil, fmt.Errorf("不支持的交易所: %s", exch)
+        return nil, fmt.Errorf("不支持的交易平台: %s", config.Exchange)
     }
 
-    scan := cfg.ScanInterval
-    if scan <= 0 {
-        scan = 3 * time.Minute // 默认3分钟
-    }
+	// 验证初始金额配置
+	if config.InitialBalance <= 0 {
+		return nil, fmt.Errorf("初始金额必须大于0，请在配置中设置InitialBalance")
+	}
 
-    logDir := fmt.Sprintf("decision_logs/%s", cfg.ID)
+	// 初始化决策日志记录器（使用trader ID创建独立目录）
+	logDir := fmt.Sprintf("decision_logs/%s", config.ID)
+	decisionLogger := logger.NewDecisionLogger(logDir)
 
-    at := &AutoTrader{
-        id:             cfg.ID,
-        name:           cfg.Name,
-        aiModel:        cfg.AIModel,
-        exchange:       exch,
-        client:         client,
-        decisionLogger: logger.NewDecisionLogger(logDir),
-        isRunning:      false,
-        startTime:      time.Time{},
-        lastReset:      time.Now(),
-        initialBalance: cfg.InitialBalance,
-        scanInterval:   scan,
-        btcethLeverage:  cfg.BTCETHLeverage,
-        altcoinLeverage: cfg.AltcoinLeverage,
-    }
-
-    // 初始化AI客户端
-    ai := mcp.New()
-    model := strings.ToLower(strings.TrimSpace(cfg.AIModel))
-    switch model {
-    case "qwen":
-        ai.SetQwenAPIKey(cfg.QwenKey, "")
-    case "custom":
-        ai.SetCustomAPI(cfg.CustomAPIURL, cfg.CustomAPIKey, cfg.CustomModelName)
-    default:
-        ai.SetDeepSeekAPIKey(cfg.DeepSeekKey)
-    }
-    at.aiClient = ai
-
-    return at, nil
-}
-
-// 基本信息
-func (a *AutoTrader) GetID() string      { return a.id }
-func (a *AutoTrader) GetName() string    { return a.name }
-func (a *AutoTrader) GetAIModel() string { return a.aiModel }
-
-// 决策日志器
-func (a *AutoTrader) GetDecisionLogger() *logger.DecisionLogger { return a.decisionLogger }
-
-// GetOKXClient 如果当前交易所是 OKX，返回底层 OKXTrader 客户端；否则返回nil
-func (a *AutoTrader) GetOKXClient() *OKXTrader {
-    if strings.ToLower(a.exchange) != "okx" {
-        return nil
-    }
-    if cl, ok := a.client.(*OKXTrader); ok {
-        return cl
-    }
-    return nil
-}
-
-// 运行
-func (a *AutoTrader) Run() error {
-    if a.isRunning {
-        return nil
-    }
-    a.isRunning = true
-    a.startTime = time.Now()
-    log.Printf(" 启动Trader: %s (%s, %s)", a.name, strings.ToUpper(a.aiModel), strings.ToUpper(a.exchange))
-
-    // 先执行一次决策周期，避免首次空转
-    a.runDecisionCycle()
-
-    // 周期性执行决策
-    go func() {
-        ticker := time.NewTicker(a.scanInterval)
-        defer ticker.Stop()
-        for a.isRunning {
-            <-ticker.C
-            a.runDecisionCycle()
-        }
-    }()
-
-    return nil
-}
-
-// 停止
-func (a *AutoTrader) Stop() { a.isRunning = false }
-
-// 状态信息
-func (a *AutoTrader) GetStatus() map[string]interface{} {
-    runtimeMinutes := 0.0
-    startStr := ""
-    if !a.startTime.IsZero() {
-        runtimeMinutes = time.Since(a.startTime).Minutes()
-        startStr = a.startTime.Format(time.RFC3339)
-    }
-    stopUntil := ""
-    if !a.stopUntil.IsZero() {
-        stopUntil = a.stopUntil.Format(time.RFC3339)
-    }
-    return map[string]interface{}{
-        "trader_id":       a.id,
-        "trader_name":     a.name,
-        "ai_model":        a.aiModel,
-        "is_running":      a.isRunning,
-        "start_time":      startStr,
-        "runtime_minutes": runtimeMinutes,
-        "call_count":      a.callCount,
-        "initial_balance": a.initialBalance,
-        "scan_interval":   a.scanInterval.String(),
-        "stop_until":      stopUntil,
-        "last_reset_time": a.lastReset.Format(time.RFC3339),
-        "ai_provider":     a.aiModel,
-        "execution_enabled": a.executionEnabled,
-    }
-}
-
-// SetExecutionEnabled 设置是否启用自动执行（仅记录建议时仍保留周期分析与日志）
-func (a *AutoTrader) SetExecutionEnabled(enabled bool) { a.executionEnabled = enabled }
-// IsExecutionEnabled 获取自动执行开关状态
-func (a *AutoTrader) IsExecutionEnabled() bool { return a.executionEnabled }
-
-// 账户信息聚合
-func (a *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
-    // 如果是 OKX，优先使用 OKX 原始私有接口数据对齐 yuanbao.py
-    if okx := a.GetOKXClient(); okx != nil {
-        rawAcc, err := okx.GetRawAccountBalance()
-        if err != nil {
-            // 回退到通用路径
-        } else if code, _ := rawAcc["code"].(string); code == "0" {
-            dataList, _ := rawAcc["data"].([]interface{})
-            if len(dataList) > 0 {
-                first, _ := dataList[0].(map[string]interface{})
-
-                // totalEq 为账户总净值（Total Equity）
-                totalEquity := 0.0
-                if s, ok := first["totalEq"].(string); ok {
-                    if f, e := strconvParseFloat(s); e == nil { totalEquity = f }
-                }
-
-                // 可用余额：优先使用顶层 availEq；否则从 USDT details.availBal 提取
-                availableBalance := 0.0
-                if s, ok := first["availEq"].(string); ok {
-                    if f, e := strconvParseFloat(s); e == nil { availableBalance = f }
-                } else if details, ok := first["details"].([]interface{}); ok {
-                    for _, d := range details {
-                        dm, _ := d.(map[string]interface{})
-                        if dm["ccy"] == "USDT" {
-                            if s2, ok2 := dm["availBal"].(string); ok2 {
-                                if f2, e2 := strconvParseFloat(s2); e2 == nil { availableBalance = f2 }
-                            }
-                            // 若USDT的availBal缺失，尝试cashBal作为可用余额近似
-                            if availableBalance <= 0 {
-                                if s3, ok3 := dm["cashBal"].(string); ok3 {
-                                    if f3, e3 := strconvParseFloat(s3); e3 == nil { availableBalance = f3 }
-                                }
-                            }
-                            break
-                        }
-                    }
-                    // 若未找到USDT或其可用余额为0，求和所有币种的availBal作为总体可用近似
-                    if availableBalance <= 0 {
-                        sumAvail := 0.0
-                        for _, d := range details {
-                            dm, _ := d.(map[string]interface{})
-                            if s2, ok2 := dm["availBal"].(string); ok2 {
-                                if f2, e2 := strconvParseFloat(s2); e2 == nil { sumAvail += f2 }
-                            }
-                        }
-                        if sumAvail > 0 { availableBalance = sumAvail }
-                    }
-                }
-                
-                // 进一步回退：若可用余额仍为0，使用统一余额接口回退
-                if availableBalance <= 0 {
-                    if balMap, err := okx.GetBalance(); err == nil && balMap != nil {
-                        if v := getFloat(balMap, "availableBalance"); v > 0 {
-                            availableBalance = v
-                        }
-                    }
-                }
-
-                // 未实现盈亏：从原始持仓 upl 字段汇总，仅统计非零持仓
-                unrealizedProfit := 0.0
-                rawPos, err := okx.GetRawPositions()
-                positionCount := 0
-                if err == nil {
-                    if code2, _ := rawPos["code"].(string); code2 == "0" {
-                        if posList, ok := rawPos["data"].([]interface{}); ok {
-                            for _, it := range posList {
-                                pm, _ := it.(map[string]interface{})
-                                // 过滤零持仓
-                                posStr, _ := pm["pos"].(string)
-                                posQty := 0.0
-                                if f, e := strconvParseFloat(posStr); e == nil { posQty = f }
-                                if math.Abs(posQty) <= 0 { continue }
-                                positionCount++
-                                if uplStr, ok := pm["upl"].(string); ok {
-                                    if f, e := strconvParseFloat(uplStr); e == nil {
-                                        unrealizedProfit += f
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 钱包余额：优先使用USDT的cashBal；否则近似为 Equity - 未实现盈亏
-                walletBalance := totalEquity - unrealizedProfit
-                if details, ok := first["details"].([]interface{}); ok {
-                    for _, d := range details {
-                        dm, _ := d.(map[string]interface{})
-                        if dm["ccy"] == "USDT" {
-                            if s2, ok2 := dm["cashBal"].(string); ok2 {
-                                if f2, e2 := strconvParseFloat(s2); e2 == nil { walletBalance = f2 }
-                            }
-                            break
-                        }
-                    }
-                }
-                // 回退：若钱包余额仍为0，使用统一余额接口回退
-                if walletBalance <= 0 {
-                    if balMap, err := okx.GetBalance(); err == nil && balMap != nil {
-                        if v := getFloat(balMap, "totalWalletBalance"); v > 0 {
-                            walletBalance = v
-                        }
-                    }
-                }
-
-                // 保证金占用：优先使用顶层 imr；否则按持仓计算（名义价值/杠杆）
-                marginUsed := 0.0
-                if s, ok := first["imr"].(string); ok {
-                    if f, e := strconvParseFloat(s); e == nil { marginUsed = f }
-                }
-                if marginUsed == 0 {
-                    // 使用标准化持仓计算保证金
-                    positionsNorm, err := a.client.GetPositions()
-                    if err == nil {
-                        for _, p := range positionsNorm {
-                            qty := getFloat(p, "positionAmt")
-                            entry := getFloat(p, "entryPrice")
-                            lev := getFloat(p, "leverage")
-                            if qty > 0 && entry > 0 && lev > 0 {
-                                positionValue := qty * entry
-                                marginUsed += positionValue / lev
-                            }
-                        }
-                    }
-                }
-
-                totalPnL := totalEquity - a.initialBalance
-                totalPnLPct := 0.0
-                if a.initialBalance > 0 {
-                    totalPnLPct = (totalPnL / a.initialBalance) * 100
-                }
-                marginUsedPct := 0.0
-                if totalEquity > 0 {
-                    marginUsedPct = (marginUsed / totalEquity) * 100
-                }
-
-                return map[string]interface{}{
-                    "total_equity":         round2(totalEquity),
-                    "wallet_balance":       round2(walletBalance),
-                    "unrealized_profit":    round2(unrealizedProfit),
-                    "available_balance":    round2(availableBalance),
-                    "total_pnl":            round2(totalPnL),
-                    "total_pnl_pct":        round2(totalPnLPct),
-                    "total_unrealized_pnl": round2(unrealizedProfit),
-                    "initial_balance":      round2(a.initialBalance),
-                    "daily_pnl":            0.0,
-                    "position_count":       positionCount,
-                    "margin_used":          round2(marginUsed),
-                    "margin_used_pct":      round2(marginUsedPct),
-                }, nil
-            }
-        }
-    }
-
-    // 通用路径（非OKX或OKX原始数据不可用时）
-    bal, err := a.client.GetBalance()
-    if err != nil {
-        return nil, err
-    }
-    positions, err := a.client.GetPositions()
-    if err != nil {
-        positions = []map[string]interface{}{}
-    }
-
-    wallet := getFloat(bal, "totalWalletBalance")
-    avail := getFloat(bal, "availableBalance")
-    unreal := getFloat(bal, "totalUnrealizedProfit")
-
-    totalEquity := wallet + unreal
-    totalPnL := totalEquity - a.initialBalance
-    totalPnLPct := 0.0
-    if a.initialBalance > 0 {
-        totalPnLPct = (totalPnL / a.initialBalance) * 100
-    }
-
-    marginUsed := 0.0
-    for _, p := range positions {
-        qty := getFloat(p, "positionAmt")
-        entry := getFloat(p, "entryPrice")
-        lev := getFloat(p, "leverage")
-        if qty > 0 && entry > 0 && lev > 0 {
-            positionValue := qty * entry
-            marginUsed += positionValue / lev
-        }
-    }
-    marginUsedPct := 0.0
-    if totalEquity > 0 {
-        marginUsedPct = (marginUsed / totalEquity) * 100
-    }
-
-    return map[string]interface{}{
-        "total_equity":        round2(totalEquity),
-        "wallet_balance":      round2(wallet),
-        "unrealized_profit":   round2(unreal),
-        "available_balance":   round2(avail),
-        "total_pnl":           round2(totalPnL),
-        "total_pnl_pct":       round2(totalPnLPct),
-        "total_unrealized_pnl": round2(unreal),
-        "initial_balance":     round2(a.initialBalance),
-        "daily_pnl":           0.0,
-        "position_count":      len(positions),
-        "margin_used":         round2(marginUsed),
-        "margin_used_pct":     round2(marginUsedPct),
+    return &AutoTrader{
+		id:                   config.ID,
+		name:                 config.Name,
+		aiModel:              config.AIModel,
+		exchange:             config.Exchange,
+		config:               config,
+		trader:               trader,
+		decisionLogger:       decisionLogger,
+		initialBalance:       config.InitialBalance,
+		lastResetTime:        time.Now(),
+		startTime:            time.Now(),
+		callCount:            0,
+        isRunning:            false,
+        positionFirstSeenTime: make(map[string]int64),
+        executionEnabled:     true,
     }, nil
 }
 
-// GetPositions 转换为API需要的字段命名
-func (a *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
-    raw, err := a.client.GetPositions()
-    if err != nil {
-        return nil, err
-    }
-    out := make([]map[string]interface{}, 0, len(raw))
-    for _, p := range raw {
-        qty := getFloat(p, "positionAmt")
-        entry := getFloat(p, "entryPrice")
-        mark := getFloat(p, "markPrice")
-        lev := getFloat(p, "leverage")
-        side, _ := p["side"].(string)
-        liq := getFloat(p, "liquidationPrice")
+// Run 运行自动交易主循环
+func (at *AutoTrader) Run() error {
+	at.isRunning = true
+	log.Println("🚀 AI驱动自动交易系统启动")
+	log.Printf("💰 初始余额: %.2f USDT", at.initialBalance)
+	log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
+	log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
 
-        pnl := 0.0
-        if qty > 0 && entry > 0 && mark > 0 {
-            if side == "short" {
-                pnl = qty * (entry - mark)
+	ticker := time.NewTicker(at.config.ScanInterval)
+	defer ticker.Stop()
+
+	// 首次立即执行
+	if err := at.runCycle(); err != nil {
+		log.Printf("❌ 执行失败: %v", err)
+	}
+
+	for at.isRunning {
+		select {
+		case <-ticker.C:
+			if err := at.runCycle(); err != nil {
+				log.Printf("❌ 执行失败: %v", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// Stop 停止自动交易
+func (at *AutoTrader) Stop() {
+	at.isRunning = false
+	log.Println("⏹ 自动交易系统停止")
+}
+
+// runCycle 运行一个交易周期（使用AI全权决策）
+func (at *AutoTrader) runCycle() error {
+	at.callCount++
+
+    log.Print("\n" + strings.Repeat("=", 70))
+    log.Printf("⏰ %s - AI决策周期 #%d", time.Now().Format("2006-01-02 15:04:05"), at.callCount)
+    log.Print(strings.Repeat("=", 70))
+
+	// 创建决策记录
+	record := &logger.DecisionRecord{
+		ExecutionLog: []string{},
+		Success:      true,
+	}
+
+	// 1. 检查是否需要停止交易
+	if time.Now().Before(at.stopUntil) {
+		remaining := at.stopUntil.Sub(time.Now())
+		log.Printf("⏸ 风险控制：暂停交易中，剩余 %.0f 分钟", remaining.Minutes())
+		record.Success = false
+		record.ErrorMessage = fmt.Sprintf("风险控制暂停中，剩余 %.0f 分钟", remaining.Minutes())
+		at.decisionLogger.LogDecision(record)
+		return nil
+	}
+
+	// 2. 重置日盈亏（每天重置）
+	if time.Since(at.lastResetTime) > 24*time.Hour {
+		at.dailyPnL = 0
+		at.lastResetTime = time.Now()
+		log.Println("📅 日盈亏已重置")
+	}
+
+	// 3. 收集交易上下文
+	ctx, err := at.buildTradingContext()
+	if err != nil {
+		record.Success = false
+		record.ErrorMessage = fmt.Sprintf("构建交易上下文失败: %v", err)
+		at.decisionLogger.LogDecision(record)
+		return fmt.Errorf("构建交易上下文失败: %w", err)
+	}
+
+	// 保存账户状态快照
+	record.AccountState = logger.AccountSnapshot{
+		TotalBalance:          ctx.Account.TotalEquity,
+		AvailableBalance:      ctx.Account.AvailableBalance,
+		TotalUnrealizedProfit: ctx.Account.TotalPnL,
+		PositionCount:         ctx.Account.PositionCount,
+		MarginUsedPct:         ctx.Account.MarginUsedPct,
+	}
+
+	// 保存持仓快照
+	for _, pos := range ctx.Positions {
+		record.Positions = append(record.Positions, logger.PositionSnapshot{
+			Symbol:           pos.Symbol,
+			Side:             pos.Side,
+			PositionAmt:      pos.Quantity,
+			EntryPrice:       pos.EntryPrice,
+			MarkPrice:        pos.MarkPrice,
+			UnrealizedProfit: pos.UnrealizedPnL,
+			Leverage:         float64(pos.Leverage),
+			LiquidationPrice: pos.LiquidationPrice,
+		})
+	}
+
+	// 保存候选币种列表
+	for _, coin := range ctx.CandidateCoins {
+		record.CandidateCoins = append(record.CandidateCoins, coin.Symbol)
+	}
+
+    log.Printf("Account equity: %.2f USDT | Available: %.2f USDT | Positions: %d",
+        ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
+
+	// 4. 调用AI获取完整决策
+    log.Println("Requesting AI analysis and decisions...")
+	decision, err := decision.GetFullDecision(ctx)
+
+	// 即使有错误，也保存思维链、决策和输入prompt（用于debug）
+	if decision != nil {
+		record.InputPrompt = decision.UserPrompt
+		record.CoTTrace = decision.CoTTrace
+		if len(decision.Decisions) > 0 {
+			decisionJSON, _ := json.MarshalIndent(decision.Decisions, "", "  ")
+			record.DecisionJSON = string(decisionJSON)
+		}
+	}
+
+	if err != nil {
+		record.Success = false
+		record.ErrorMessage = fmt.Sprintf("获取AI决策失败: %v", err)
+
+		// 打印AI思维链（即使有错误）
+		if decision != nil && decision.CoTTrace != "" {
+            log.Print("\n" + strings.Repeat("-", 70))
+            log.Println("💭 AI思维链分析（错误情况）:")
+            log.Println(strings.Repeat("-", 70))
+            log.Println(decision.CoTTrace)
+            log.Print(strings.Repeat("-", 70) + "\n")
+		}
+
+		at.decisionLogger.LogDecision(record)
+		return fmt.Errorf("获取AI决策失败: %w", err)
+	}
+
+	// 5. 打印AI思维链
+    log.Print("\n" + strings.Repeat("-", 70))
+    log.Println("💭 AI思维链分析:")
+    log.Println(strings.Repeat("-", 70))
+    log.Println(decision.CoTTrace)
+    log.Print(strings.Repeat("-", 70) + "\n")
+
+	// 6. 打印AI决策
+	log.Printf("📋 AI决策列表 (%d 个):\n", len(decision.Decisions))
+	for i, d := range decision.Decisions {
+		log.Printf("  [%d] %s: %s - %s", i+1, d.Symbol, d.Action, d.Reasoning)
+		if d.Action == "open_long" || d.Action == "open_short" {
+			log.Printf("      杠杆: %dx | 仓位: %.2f USDT | 止损: %.4f | 止盈: %.4f",
+				d.Leverage, d.PositionSizeUSD, d.StopLoss, d.TakeProfit)
+		}
+	}
+	log.Println()
+
+	// 7. 对决策排序：确保先平仓后开仓（防止仓位叠加超限）
+	sortedDecisions := sortDecisionsByPriority(decision.Decisions)
+
+	log.Println("🔄 执行顺序（已优化）: 先平仓→后开仓")
+	for i, d := range sortedDecisions {
+		log.Printf("  [%d] %s %s", i+1, d.Symbol, d.Action)
+	}
+	log.Println()
+
+    // 执行决策并记录结果
+    for _, d := range sortedDecisions {
+        actionRecord := logger.DecisionAction{
+            Action:    d.Action,
+            Symbol:    d.Symbol,
+            Quantity:  0,
+            Leverage:  d.Leverage,
+            Price:     0,
+            Timestamp: time.Now(),
+            Success:   false,
+        }
+
+        // 如果未启用自动执行，跳过实际下单，仅记录
+        if !at.executionEnabled {
+            actionRecord.Error = "execution_disabled"
+            record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("Skip execution (auto-trading disabled): %s %s", d.Symbol, d.Action))
+        } else {
+            if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
+                log.Printf("Decision execution failed (%s %s): %v", d.Symbol, d.Action, err)
+                actionRecord.Error = err.Error()
+                record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("%s %s failed: %v", d.Symbol, d.Action, err))
             } else {
-                pnl = qty * (mark - entry)
+                actionRecord.Success = true
+                record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("%s %s succeeded", d.Symbol, d.Action))
+                // 成功执行后短暂延迟
+                time.Sleep(1 * time.Second)
             }
         }
-        positionValue := qty * entry
-        marginUsed := 0.0
-        if lev > 0 {
-            marginUsed = positionValue / lev
-        }
-        pnlPct := 0.0
-        if marginUsed > 0 {
-            pnlPct = (pnl / marginUsed) * 100
-        }
 
-        out = append(out, map[string]interface{}{
-            "symbol":             p["symbol"],
-            "side":               side,
-            "entry_price":        round2(entry),
-            "mark_price":         round2(mark),
-            "quantity":           round3(qty),
-            "leverage":           round2(lev),
-            "unrealized_pnl":     round2(pnl),
-            "unrealized_pnl_pct": round2(pnlPct),
-            "liquidation_price":  round2(liq),
-            "margin_used":        round2(marginUsed),
-        })
+        record.Decisions = append(record.Decisions, actionRecord)
     }
-    return out, nil
+
+	// 8. 保存决策记录
+    if err := at.decisionLogger.LogDecision(record); err != nil {
+        log.Printf("Failed to save decision record: %v", err)
+    }
+
+	return nil
 }
 
-// 辅助函数
-func getFloat(m map[string]interface{}, key string) float64 {
-    v, ok := m[key]
-    if !ok {
-        return 0
-    }
-    switch t := v.(type) {
-    case float64:
-        return t
-    case float32:
-        return float64(t)
-    case int:
-        return float64(t)
-    case int64:
-        return float64(t)
-    case string:
-        f, _ := strconvParseFloat(t)
-        return f
-    default:
-        return 0
-    }
-}
-
-func strconvParseFloat(s string) (float64, error) {
-    if strings.TrimSpace(s) == "" {
-        return 0, nil
-    }
-    return strconv.ParseFloat(s, 64)
-}
-
-func round2(f float64) float64 { return math.Round(f*100) / 100 }
-func round3(f float64) float64 { return math.Round(f*1000) / 1000 }
-
-// runDecisionCycle 构建上下文、获取AI决策并记录日志
-func (a *AutoTrader) runDecisionCycle() {
-    a.callCount++
-
-    // 获取账户信息与持仓
-    account, err := a.GetAccountInfo()
+// buildTradingContext 构建交易上下文
+func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
+    // 1. 获取账户信息
+    balance, err := at.trader.GetBalance()
     if err != nil {
-        log.Printf("⚠️ 获取账户信息失败，使用默认账户快照: %v", err)
-        account = map[string]interface{}{
-            "total_equity":       a.initialBalance,
-            "available_balance":  a.initialBalance,
-            "total_pnl":          0.0,
-            "total_pnl_pct":      0.0,
-            "margin_used":        0.0,
-            "margin_used_pct":    0.0,
-            "position_count":     0,
-        }
-    }
-    posList, err := a.GetPositions()
-    if err != nil {
-        log.Printf("⚠️ 获取持仓失败: %v", err)
-        posList = []map[string]interface{}{}
-    }
-
-    // 构建决策上下文中的账户与持仓结构
-    accInfo := decision.AccountInfo{
-        TotalEquity:      getFloat(account, "total_equity"),
-        AvailableBalance: getFloat(account, "available_balance"),
-        TotalPnL:         getFloat(account, "total_pnl"),
-        TotalPnLPct:      getFloat(account, "total_pnl_pct"),
-        MarginUsed:       getFloat(account, "margin_used"),
-        MarginUsedPct:    getFloat(account, "margin_used_pct"),
-        PositionCount:    int(getFloat(map[string]interface{}{"position_count": float64(len(posList))}, "position_count")),
-    }
-
-    var positions []decision.PositionInfo
-    nowMs := time.Now().UnixMilli()
-    for _, p := range posList {
-        positions = append(positions, decision.PositionInfo{
-            Symbol:           toString(p["symbol"]),
-            Side:             toString(p["side"]),
-            EntryPrice:       getFloat(p, "entry_price"),
-            MarkPrice:        getFloat(p, "mark_price"),
-            Quantity:         getFloat(p, "quantity"),
-            Leverage:         int(getFloat(p, "leverage")),
-            UnrealizedPnL:    getFloat(p, "unrealized_pnl"),
-            UnrealizedPnLPct: getFloat(p, "unrealized_pnl_pct"),
-            LiquidationPrice: getFloat(p, "liquidation_price"),
-            MarginUsed:       getFloat(p, "margin_used"),
-            UpdateTime:       nowMs,
-        })
-    }
-
-    // 合并币种池（AI500 + OI Top）作为候选列表
-    merged, err := pool.GetMergedCoinPool(20)
-    candidateCoins := make([]decision.CandidateCoin, 0)
-    if err != nil {
-        log.Printf("⚠️ 获取合并币种池失败: %v", err)
-    } else {
-        for _, symbol := range merged.AllSymbols {
-            candidateCoins = append(candidateCoins, decision.CandidateCoin{
-                Symbol:  symbol,
-                Sources: merged.SymbolSources[symbol],
-            })
+        // 容错：在 DryRun 或密钥缺失时允许继续，使用占位数据
+        log.Printf("⚠️  获取账户余额失败，使用占位数据继续: %v", err)
+        balance = map[string]interface{}{
+            "totalWalletBalance": 0.0,
+            "totalUnrealizedProfit": 0.0,
+            "availableBalance": 0.0,
         }
     }
 
-    // 历史表现（用于系统提示中的夏普比率反馈）
-    perf, _ := a.decisionLogger.AnalyzePerformance(100)
+	// 获取账户字段
+	totalWalletBalance := 0.0
+	totalUnrealizedProfit := 0.0
+	availableBalance := 0.0
 
-    // 构建上下文
-    ctx := &decision.Context{
-        CurrentTime:     time.Now().Format("2006-01-02 15:04:05"),
-        RuntimeMinutes:  int(time.Since(a.startTime).Minutes()),
-        CallCount:       a.callCount,
-        Account:         accInfo,
-        Positions:       positions,
-        CandidateCoins:  candidateCoins,
-        Performance:     perf,
-        BTCETHLeverage:  a.btcethLeverage,
-        AltcoinLeverage: a.altcoinLeverage,
-    }
+	if wallet, ok := balance["totalWalletBalance"].(float64); ok {
+		totalWalletBalance = wallet
+	}
+	if unrealized, ok := balance["totalUnrealizedProfit"].(float64); ok {
+		totalUnrealizedProfit = unrealized
+	}
+	if avail, ok := balance["availableBalance"].(float64); ok {
+		availableBalance = avail
+	}
 
-    // 调用AI决策引擎
-    fullDecision, err := decision.GetFullDecision(ctx, a.aiClient)
-    record := &logger.DecisionRecord{
-        AccountState: logger.AccountSnapshot{
-            TotalBalance:          accInfo.TotalEquity,
-            AvailableBalance:      accInfo.AvailableBalance,
-            TotalUnrealizedProfit: accInfo.TotalPnL,
-            PositionCount:         accInfo.PositionCount,
-            MarginUsedPct:         accInfo.MarginUsedPct,
-        },
-        Positions:      []logger.PositionSnapshot{},
-        CandidateCoins: []string{},
-        ExecutionLog:   []string{},
-        Success:        err == nil,
-    }
+	// DryRun保护：若余额不可用且配置了初始余额，则用初始余额作为钱包/可用
+	if totalWalletBalance == 0 && totalUnrealizedProfit == 0 && at.initialBalance > 0 {
+		totalWalletBalance = at.initialBalance
+		availableBalance = at.initialBalance
+	}
 
-    for _, p := range positions {
-        record.Positions = append(record.Positions, logger.PositionSnapshot{
-            Symbol:           p.Symbol,
-            Side:             p.Side,
-            PositionAmt:      p.Quantity,
-            EntryPrice:       p.EntryPrice,
-            MarkPrice:        p.MarkPrice,
-            UnrealizedProfit: p.UnrealizedPnL,
-            Leverage:         float64(p.Leverage),
-            LiquidationPrice: p.LiquidationPrice,
-        })
-    }
-    for _, c := range candidateCoins {
-        record.CandidateCoins = append(record.CandidateCoins, c.Symbol)
-    }
+	// Total Equity = 钱包余额 + 未实现盈亏
+	totalEquity := totalWalletBalance + totalUnrealizedProfit
 
+	// 2. 获取持仓信息
+    positions, err := at.trader.GetPositions()
     if err != nil {
-        record.InputPrompt = ""
-        record.CoTTrace = ""
-        record.DecisionJSON = "[]"
-        record.ErrorMessage = fmt.Sprintf("AI决策失败: %v", err)
-        record.ExecutionLog = append(record.ExecutionLog, "AI调用失败，未执行交易，仅记录账户与持仓快照")
-        _ = a.decisionLogger.LogDecision(record)
-        return
+        // 容错：在 DryRun 或密钥缺失时允许继续，使用空持仓
+        log.Printf("⚠️  获取持仓失败，使用空持仓继续: %v", err)
+        positions = []map[string]interface{}{}
     }
 
-    decBytes, _ := json.Marshal(fullDecision.Decisions)
-    record.InputPrompt = fullDecision.UserPrompt
-    record.CoTTrace = fullDecision.CoTTrace
-    record.DecisionJSON = string(decBytes)
-    if !a.executionEnabled {
-        record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("AI生成%d条决策；自动执行已禁用，本周期仅分析并记录", len(fullDecision.Decisions)))
-    } else {
-        // 目前未接入真实下单路径，保留提示与日志结构
-        record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("AI生成%d条决策；自动执行已启用（当前实现未下单，仅记录建议）", len(fullDecision.Decisions)))
-    }
+	var positionInfos []decision.PositionInfo
+	totalMarginUsed := 0.0
 
-    if err := a.decisionLogger.LogDecision(record); err != nil {
-        log.Printf("⚠️ 记录决策失败: %v", err)
+	// 当前持仓的key集合（用于清理已平仓的记录）
+	currentPositionKeys := make(map[string]bool)
+
+	for _, pos := range positions {
+		symbol := pos["symbol"].(string)
+		side := pos["side"].(string)
+		entryPrice := pos["entryPrice"].(float64)
+		markPrice := pos["markPrice"].(float64)
+		quantity := pos["positionAmt"].(float64)
+		if quantity < 0 {
+			quantity = -quantity // 空仓数量为负，转为正数
+		}
+		unrealizedPnl := pos["unRealizedProfit"].(float64)
+		liquidationPrice := pos["liquidationPrice"].(float64)
+
+		// 计算盈亏百分比
+		pnlPct := 0.0
+		if side == "long" {
+			pnlPct = ((markPrice - entryPrice) / entryPrice) * 100
+		} else {
+			pnlPct = ((entryPrice - markPrice) / entryPrice) * 100
+		}
+
+		// 计算占用保证金（估算）
+		leverage := 10 // 默认值，实际应该从持仓信息获取
+		if lev, ok := pos["leverage"].(float64); ok {
+			leverage = int(lev)
+		}
+		marginUsed := (quantity * markPrice) / float64(leverage)
+		totalMarginUsed += marginUsed
+
+		// 跟踪持仓首次出现时间
+		posKey := symbol + "_" + side
+		currentPositionKeys[posKey] = true
+		if _, exists := at.positionFirstSeenTime[posKey]; !exists {
+			// 新持仓，记录当前时间
+			at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
+		}
+		updateTime := at.positionFirstSeenTime[posKey]
+
+		positionInfos = append(positionInfos, decision.PositionInfo{
+			Symbol:           symbol,
+			Side:             side,
+			EntryPrice:       entryPrice,
+			MarkPrice:        markPrice,
+			Quantity:         quantity,
+			Leverage:         leverage,
+			UnrealizedPnL:    unrealizedPnl,
+			UnrealizedPnLPct: pnlPct,
+			LiquidationPrice: liquidationPrice,
+			MarginUsed:       marginUsed,
+			UpdateTime:       updateTime,
+		})
+	}
+
+	// 清理已平仓的持仓记录
+	for key := range at.positionFirstSeenTime {
+		if !currentPositionKeys[key] {
+			delete(at.positionFirstSeenTime, key)
+		}
+	}
+
+	// 3. 获取合并的候选币种池（AI500 + OI Top，去重）
+	// 无论有没有持仓，都分析相同数量的币种（让AI看到所有好机会）
+	// AI会根据保证金使用率和现有持仓情况，自己决定是否要换仓
+	const ai500Limit = 20 // AI500取前20个评分最高的币种
+
+	// 获取合并后的币种池（AI500 + OI Top）
+	mergedPool, err := pool.GetMergedCoinPool(ai500Limit)
+	if err != nil {
+		return nil, fmt.Errorf("获取合并币种池失败: %w", err)
+	}
+
+	// 构建候选币种列表（包含来源信息）
+	var candidateCoins []decision.CandidateCoin
+	for _, symbol := range mergedPool.AllSymbols {
+		sources := mergedPool.SymbolSources[symbol]
+		candidateCoins = append(candidateCoins, decision.CandidateCoin{
+			Symbol:  symbol,
+			Sources: sources, // "ai500" 和/或 "oi_top"
+		})
+	}
+
+	log.Printf("📋 合并币种池: AI500前%d + OI_Top20 = 总计%d个候选币种",
+		ai500Limit, len(candidateCoins))
+
+	// 4. 计算总盈亏
+	totalPnL := totalEquity - at.initialBalance
+	totalPnLPct := 0.0
+	if at.initialBalance > 0 {
+		totalPnLPct = (totalPnL / at.initialBalance) * 100
+	}
+
+	marginUsedPct := 0.0
+	if totalEquity > 0 {
+		marginUsedPct = (totalMarginUsed / totalEquity) * 100
+	}
+
+	// 5. 分析历史表现（最近20个周期）
+	performance, err := at.decisionLogger.AnalyzePerformance(20)
+	if err != nil {
+		log.Printf("⚠️  分析历史表现失败: %v", err)
+		// 不影响主流程，继续执行（但设置performance为nil以避免传递错误数据）
+		performance = nil
+	}
+
+	// 6. 构建上下文
+	ctx := &decision.Context{
+		CurrentTime:      time.Now().Format("2006-01-02 15:04:05"),
+		RuntimeMinutes:   int(time.Since(at.startTime).Minutes()),
+		CallCount:        at.callCount,
+		BTCETHLeverage:   at.config.BTCETHLeverage,   // 使用配置的杠杆倍数
+		AltcoinLeverage:  at.config.AltcoinLeverage,  // 使用配置的杠杆倍数
+		Account: decision.AccountInfo{
+			TotalEquity:      totalEquity,
+			AvailableBalance: availableBalance,
+			TotalPnL:         totalPnL,
+			TotalPnLPct:      totalPnLPct,
+			MarginUsed:       totalMarginUsed,
+			MarginUsedPct:    marginUsedPct,
+			PositionCount:    len(positionInfos),
+		},
+		Positions:      positionInfos,
+		CandidateCoins: candidateCoins,
+		Performance:    performance, // 添加历史表现分析
+	}
+
+	return ctx, nil
+}
+
+// executeDecisionWithRecord 执行AI决策并记录详细信息
+func (at *AutoTrader) executeDecisionWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+	switch decision.Action {
+	case "open_long":
+		return at.executeOpenLongWithRecord(decision, actionRecord)
+	case "open_short":
+		return at.executeOpenShortWithRecord(decision, actionRecord)
+	case "close_long":
+		return at.executeCloseLongWithRecord(decision, actionRecord)
+	case "close_short":
+		return at.executeCloseShortWithRecord(decision, actionRecord)
+	case "hold", "wait":
+		// 无需执行，仅记录
+		return nil
+	default:
+		return fmt.Errorf("未知的action: %s", decision.Action)
+	}
+}
+
+// executeOpenLongWithRecord 执行开多仓并记录详细信息
+func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+    if at.config.DryRun || !at.executionEnabled {
+        log.Printf("  🚫 DryRun/未启用执行：跳过开多 %s，杠杆=%d，仓位USD=%.2f", decision.Symbol, decision.Leverage, decision.PositionSizeUSD)
+        return nil
+    }
+    log.Printf("  📈 开多仓: %s", decision.Symbol)
+
+	// ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）
+	positions, err := at.trader.GetPositions()
+	if err == nil {
+		for _, pos := range positions {
+			if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
+				return fmt.Errorf("❌ %s 已有多仓，拒绝开仓以防止仓位叠加超限。如需换仓，请先给出 close_long 决策", decision.Symbol)
+			}
+		}
+	}
+
+	// 获取当前价格
+	marketData, err := market.Get(decision.Symbol)
+	if err != nil {
+		return err
+	}
+
+	// 计算数量
+	quantity := decision.PositionSizeUSD / marketData.CurrentPrice
+	actionRecord.Quantity = quantity
+	actionRecord.Price = marketData.CurrentPrice
+
+	// 开仓
+	order, err := at.trader.OpenLong(decision.Symbol, quantity, decision.Leverage)
+	if err != nil {
+		return err
+	}
+
+	// 记录订单ID
+	if orderID, ok := order["orderId"].(int64); ok {
+		actionRecord.OrderID = orderID
+	}
+
+	log.Printf("  ✓ 开仓成功，订单ID: %v, 数量: %.4f", order["orderId"], quantity)
+
+	// 记录开仓时间
+	posKey := decision.Symbol + "_long"
+	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
+
+	// 设置止损止盈
+	if err := at.trader.SetStopLoss(decision.Symbol, "LONG", quantity, decision.StopLoss); err != nil {
+		log.Printf("  ⚠ 设置止损失败: %v", err)
+	}
+	if err := at.trader.SetTakeProfit(decision.Symbol, "LONG", quantity, decision.TakeProfit); err != nil {
+		log.Printf("  ⚠ 设置止盈失败: %v", err)
+	}
+
+	return nil
+}
+
+// executeOpenShortWithRecord 执行开空仓并记录详细信息
+func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+    if at.config.DryRun || !at.executionEnabled {
+        log.Printf("  🚫 DryRun/未启用执行：跳过开空 %s，杠杆=%d，仓位USD=%.2f", decision.Symbol, decision.Leverage, decision.PositionSizeUSD)
+        return nil
+    }
+    log.Printf("  📉 开空仓: %s", decision.Symbol)
+
+	// ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）
+	positions, err := at.trader.GetPositions()
+	if err == nil {
+		for _, pos := range positions {
+			if pos["symbol"] == decision.Symbol && pos["side"] == "short" {
+				return fmt.Errorf("❌ %s 已有空仓，拒绝开仓以防止仓位叠加超限。如需换仓，请先给出 close_short 决策", decision.Symbol)
+			}
+		}
+	}
+
+	// 获取当前价格
+	marketData, err := market.Get(decision.Symbol)
+	if err != nil {
+		return err
+	}
+
+	// 计算数量
+	quantity := decision.PositionSizeUSD / marketData.CurrentPrice
+	actionRecord.Quantity = quantity
+	actionRecord.Price = marketData.CurrentPrice
+
+	// 开仓
+	order, err := at.trader.OpenShort(decision.Symbol, quantity, decision.Leverage)
+	if err != nil {
+		return err
+	}
+
+	// 记录订单ID
+	if orderID, ok := order["orderId"].(int64); ok {
+		actionRecord.OrderID = orderID
+	}
+
+	log.Printf("  ✓ 开仓成功，订单ID: %v, 数量: %.4f", order["orderId"], quantity)
+
+	// 记录开仓时间
+	posKey := decision.Symbol + "_short"
+	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
+
+	// 设置止损止盈
+	if err := at.trader.SetStopLoss(decision.Symbol, "SHORT", quantity, decision.StopLoss); err != nil {
+		log.Printf("  ⚠ 设置止损失败: %v", err)
+	}
+	if err := at.trader.SetTakeProfit(decision.Symbol, "SHORT", quantity, decision.TakeProfit); err != nil {
+		log.Printf("  ⚠ 设置止盈失败: %v", err)
+	}
+
+	return nil
+}
+
+// executeCloseLongWithRecord 执行平多仓并记录详细信息
+func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+    if at.config.DryRun || !at.executionEnabled {
+        log.Printf("  🚫 DryRun/未启用执行：跳过平多 %s", decision.Symbol)
+        return nil
+    }
+    log.Printf("  🔄 平多仓: %s", decision.Symbol)
+
+	// 获取当前价格
+	marketData, err := market.Get(decision.Symbol)
+	if err != nil {
+		return err
+	}
+	actionRecord.Price = marketData.CurrentPrice
+
+	// 平仓
+	order, err := at.trader.CloseLong(decision.Symbol, 0) // 0 = 全部平仓
+	if err != nil {
+		return err
+	}
+
+	// 记录订单ID
+	if orderID, ok := order["orderId"].(int64); ok {
+		actionRecord.OrderID = orderID
+	}
+
+	log.Printf("  ✓ 平仓成功")
+	return nil
+}
+
+// executeCloseShortWithRecord 执行平空仓并记录详细信息
+func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+    if at.config.DryRun || !at.executionEnabled {
+        log.Printf("  🚫 DryRun/未启用执行：跳过平空 %s", decision.Symbol)
+        return nil
+    }
+    log.Printf("  🔄 平空仓: %s", decision.Symbol)
+
+	// 获取当前价格
+	marketData, err := market.Get(decision.Symbol)
+	if err != nil {
+		return err
+	}
+	actionRecord.Price = marketData.CurrentPrice
+
+	// 平仓
+	order, err := at.trader.CloseShort(decision.Symbol, 0) // 0 = 全部平仓
+	if err != nil {
+		return err
+	}
+
+	// 记录订单ID
+	if orderID, ok := order["orderId"].(int64); ok {
+		actionRecord.OrderID = orderID
+	}
+
+	log.Printf("  ✓ 平仓成功")
+	return nil
+}
+
+// GetID 获取trader ID
+func (at *AutoTrader) GetID() string {
+	return at.id
+}
+
+// GetName 获取trader名称
+func (at *AutoTrader) GetName() string {
+	return at.name
+}
+
+// GetAIModel 获取AI模型
+func (at *AutoTrader) GetAIModel() string {
+	return at.aiModel
+}
+
+// GetDecisionLogger 获取决策日志记录器
+func (at *AutoTrader) GetDecisionLogger() *logger.DecisionLogger {
+	return at.decisionLogger
+}
+
+// GetStatus 获取系统状态（用于API）
+func (at *AutoTrader) GetStatus() map[string]interface{} {
+	aiProvider := "DeepSeek"
+	if at.config.UseQwen {
+		aiProvider = "Qwen"
+	}
+
+    return map[string]interface{}{
+		"trader_id":       at.id,
+		"trader_name":     at.name,
+		"ai_model":        at.aiModel,
+		"exchange":        at.exchange,
+		"is_running":      at.isRunning,
+		"start_time":      at.startTime.Format(time.RFC3339),
+		"runtime_minutes": int(time.Since(at.startTime).Minutes()),
+		"call_count":      at.callCount,
+		"initial_balance": at.initialBalance,
+		"scan_interval":   at.config.ScanInterval.String(),
+		"stop_until":      at.stopUntil.Format(time.RFC3339),
+		"last_reset_time": at.lastResetTime.Format(time.RFC3339),
+        "ai_provider":     aiProvider,
+        "execution_enabled": at.executionEnabled,
     }
 }
 
-func toString(v interface{}) string {
-    if v == nil { return "" }
-    switch t := v.(type) {
-    case string:
-        return t
-    default:
-        return fmt.Sprintf("%v", t)
+// SetExecutionEnabled 设置是否启用自动执行
+func (at *AutoTrader) SetExecutionEnabled(enabled bool) {
+    at.executionEnabled = enabled
+}
+
+// IsExecutionEnabled 获取自动执行开关状态
+func (at *AutoTrader) IsExecutionEnabled() bool {
+    return at.executionEnabled
+}
+
+// GetAccountInfo 获取账户信息（用于API）
+func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
+    // DryRun 优先：直接使用初始余额作为账户状态，避免依赖私有接口
+    if at.config.DryRun {
+        totalWalletBalance := at.initialBalance
+        availableBalance := at.initialBalance
+        totalUnrealizedProfit := 0.0
+
+        totalEquity := totalWalletBalance + totalUnrealizedProfit
+        totalPnL := totalEquity - at.initialBalance
+        totalPnLPct := 0.0
+        if at.initialBalance > 0 {
+            totalPnLPct = (totalPnL / at.initialBalance) * 100
+        }
+
+        return map[string]interface{}{
+            "total_equity":         totalEquity,
+            "wallet_balance":       totalWalletBalance,
+            "unrealized_profit":    totalUnrealizedProfit,
+            "available_balance":    availableBalance,
+            "total_pnl":            totalPnL,
+            "total_pnl_pct":        totalPnLPct,
+            "total_unrealized_pnl": 0.0,
+            "initial_balance":      at.initialBalance,
+            "daily_pnl":            at.dailyPnL,
+            "position_count":       0,
+            "margin_used":          0.0,
+            "margin_used_pct":      0.0,
+        }, nil
     }
+
+    balance, err := at.trader.GetBalance()
+    if err != nil {
+        // 容错：返回占位数据，避免前端接口报错
+        log.Printf("⚠️  获取余额失败，返回占位数据: %v", err)
+        // DryRun 回退：如配置了初始余额，则以其作为钱包与可用余额
+        wallet := 0.0
+        avail := 0.0
+        if at.initialBalance > 0 {
+            wallet = at.initialBalance
+            avail = at.initialBalance
+        }
+        balance = map[string]interface{}{
+            "totalWalletBalance":    wallet,
+            "totalUnrealizedProfit": 0.0,
+            "availableBalance":      avail,
+        }
+    }
+
+	// 获取账户字段
+	totalWalletBalance := 0.0
+	totalUnrealizedProfit := 0.0
+	availableBalance := 0.0
+
+	if wallet, ok := balance["totalWalletBalance"].(float64); ok {
+		totalWalletBalance = wallet
+	}
+	if unrealized, ok := balance["totalUnrealizedProfit"].(float64); ok {
+		totalUnrealizedProfit = unrealized
+	}
+	if avail, ok := balance["availableBalance"].(float64); ok {
+		availableBalance = avail
+	}
+
+	// Total Equity = 钱包余额 + 未实现盈亏
+	totalEquity := totalWalletBalance + totalUnrealizedProfit
+
+	// 获取持仓计算总保证金
+    positions, err := at.trader.GetPositions()
+    if err != nil {
+        log.Printf("⚠️  获取持仓失败，返回空持仓: %v", err)
+        positions = []map[string]interface{}{}
+    }
+
+	totalMarginUsed := 0.0
+	totalUnrealizedPnL := 0.0
+	for _, pos := range positions {
+		markPrice := pos["markPrice"].(float64)
+		quantity := pos["positionAmt"].(float64)
+		if quantity < 0 {
+			quantity = -quantity
+		}
+		unrealizedPnl := pos["unRealizedProfit"].(float64)
+		totalUnrealizedPnL += unrealizedPnl
+
+		leverage := 10
+		if lev, ok := pos["leverage"].(float64); ok {
+			leverage = int(lev)
+		}
+		marginUsed := (quantity * markPrice) / float64(leverage)
+		totalMarginUsed += marginUsed
+	}
+
+	totalPnL := totalEquity - at.initialBalance
+	totalPnLPct := 0.0
+	if at.initialBalance > 0 {
+		totalPnLPct = (totalPnL / at.initialBalance) * 100
+	}
+
+	marginUsedPct := 0.0
+	if totalEquity > 0 {
+		marginUsedPct = (totalMarginUsed / totalEquity) * 100
+	}
+
+	return map[string]interface{}{
+		// 核心字段
+		"total_equity":      totalEquity,           // 账户净值 = wallet + unrealized
+		"wallet_balance":    totalWalletBalance,    // 钱包余额（不含未实现盈亏）
+		"unrealized_profit": totalUnrealizedProfit, // 未实现盈亏（从API）
+		"available_balance": availableBalance,      // 可用余额
+
+		// 盈亏统计
+		"total_pnl":            totalPnL,           // 总盈亏 = equity - initial
+		"total_pnl_pct":        totalPnLPct,        // 总盈亏百分比
+		"total_unrealized_pnl": totalUnrealizedPnL, // 未实现盈亏（从持仓计算）
+		"initial_balance":      at.initialBalance,  // 初始余额
+		"daily_pnl":            at.dailyPnL,        // 日盈亏
+
+		// 持仓信息
+		"position_count":  len(positions),  // 持仓数量
+		"margin_used":     totalMarginUsed, // 保证金占用
+		"margin_used_pct": marginUsedPct,   // 保证金使用率
+	}, nil
+}
+
+// GetPositions 获取持仓列表（用于API）
+func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
+    positions, err := at.trader.GetPositions()
+    if err != nil {
+        // 容错：返回空列表，避免前端报错
+        log.Printf("⚠️  获取持仓失败，返回空列表: %v", err)
+        return []map[string]interface{}{}, nil
+    }
+
+	var result []map[string]interface{}
+	for _, pos := range positions {
+		symbol := pos["symbol"].(string)
+		side := pos["side"].(string)
+		entryPrice := pos["entryPrice"].(float64)
+		markPrice := pos["markPrice"].(float64)
+		quantity := pos["positionAmt"].(float64)
+		if quantity < 0 {
+			quantity = -quantity
+		}
+		unrealizedPnl := pos["unRealizedProfit"].(float64)
+		liquidationPrice := pos["liquidationPrice"].(float64)
+
+		leverage := 10
+		if lev, ok := pos["leverage"].(float64); ok {
+			leverage = int(lev)
+		}
+
+		pnlPct := 0.0
+		if side == "long" {
+			pnlPct = ((markPrice - entryPrice) / entryPrice) * 100
+		} else {
+			pnlPct = ((entryPrice - markPrice) / entryPrice) * 100
+		}
+
+		marginUsed := (quantity * markPrice) / float64(leverage)
+
+		result = append(result, map[string]interface{}{
+			"symbol":             symbol,
+			"side":               side,
+			"entry_price":        entryPrice,
+			"mark_price":         markPrice,
+			"quantity":           quantity,
+			"leverage":           leverage,
+			"unrealized_pnl":     unrealizedPnl,
+			"unrealized_pnl_pct": pnlPct,
+			"liquidation_price":  liquidationPrice,
+			"margin_used":        marginUsed,
+		})
+	}
+
+	return result, nil
+}
+
+// sortDecisionsByPriority 对决策排序：先平仓，再开仓，最后hold/wait
+// 这样可以避免换仓时仓位叠加超限
+func sortDecisionsByPriority(decisions []decision.Decision) []decision.Decision {
+	if len(decisions) <= 1 {
+		return decisions
+	}
+
+	// 定义优先级
+	getActionPriority := func(action string) int {
+		switch action {
+		case "close_long", "close_short":
+			return 1 // 最高优先级：先平仓
+		case "open_long", "open_short":
+			return 2 // 次优先级：后开仓
+		case "hold", "wait":
+			return 3 // 最低优先级：观望
+		default:
+			return 999 // 未知动作放最后
+		}
+	}
+
+	// 复制决策列表
+	sorted := make([]decision.Decision, len(decisions))
+	copy(sorted, decisions)
+
+	// 按优先级排序
+	for i := 0; i < len(sorted)-1; i++ {
+		for j := i + 1; j < len(sorted); j++ {
+			if getActionPriority(sorted[i].Action) > getActionPriority(sorted[j].Action) {
+				sorted[i], sorted[j] = sorted[j], sorted[i]
+			}
+		}
+	}
+
+	return sorted
 }

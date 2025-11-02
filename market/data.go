@@ -1,13 +1,13 @@
 package market
 
 import (
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"math"
-	"net/http"
-	"strconv"
-	"strings"
+    "encoding/json"
+    "fmt"
+    "io/ioutil"
+    "math"
+    "net/http"
+    "strconv"
+    "strings"
 )
 
 // Data 市场数据结构
@@ -69,16 +69,16 @@ func Get(symbol string) (*Data, error) {
 	symbol = Normalize(symbol)
 
 	// 获取3分钟K线数据 (最近10个)
-	klines3m, err := getKlines(symbol, "3m", 40) // 多获取一些用于计算
-	if err != nil {
-		return nil, fmt.Errorf("获取3分钟K线失败: %v", err)
-	}
+    klines3m, err := getKlines(symbol, "3m", 40) // fetch more for indicators
+    if err != nil {
+        return nil, fmt.Errorf("failed to fetch 3-minute klines: %v", err)
+    }
 
 	// 获取4小时K线数据 (最近10个)
-	klines4h, err := getKlines(symbol, "4h", 60) // 多获取用于计算指标
-	if err != nil {
-		return nil, fmt.Errorf("获取4小时K线失败: %v", err)
-	}
+    klines4h, err := getKlines(symbol, "4h", 60) // fetch more for indicators
+    if err != nil {
+        return nil, fmt.Errorf("failed to fetch 4-hour klines: %v", err)
+    }
 
 	// 计算当前指标 (基于3分钟最新数据)
 	currentPrice := klines3m[len(klines3m)-1].Close
@@ -136,49 +136,127 @@ func Get(symbol string) (*Data, error) {
 	}, nil
 }
 
-// getKlines 从Binance获取K线数据
+// getKlines 优先从Binance获取K线；失败时回退到OKX
 func getKlines(symbol, interval string, limit int) ([]Kline, error) {
-	url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/klines?symbol=%s&interval=%s&limit=%d",
-		symbol, interval, limit)
+    // 1) 先尝试 Binance
+    binanceURL := fmt.Sprintf("https://fapi.binance.com/fapi/v1/klines?symbol=%s&interval=%s&limit=%d", symbol, interval, limit)
+    if kl, err := fetchBinanceKlines(binanceURL); err == nil && len(kl) > 0 {
+        return kl, nil
+    }
 
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+    // 2) 回退到 OKX（将 symbol 转为 instId，并转换 interval）
+    return fetchOKXKlines(symbol, interval, limit)
+}
 
-	body, err := ioutil.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
+// fetchBinanceKlines 获取 Binance K线
+func fetchBinanceKlines(url string) ([]Kline, error) {
+    resp, err := http.Get(url)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
 
-	var rawData [][]interface{}
-	if err := json.Unmarshal(body, &rawData); err != nil {
-		return nil, err
-	}
+    body, err := ioutil.ReadAll(resp.Body)
+    if err != nil {
+        return nil, err
+    }
 
-	klines := make([]Kline, len(rawData))
-	for i, item := range rawData {
-		openTime := int64(item[0].(float64))
-		open, _ := parseFloat(item[1])
-		high, _ := parseFloat(item[2])
-		low, _ := parseFloat(item[3])
-		close, _ := parseFloat(item[4])
-		volume, _ := parseFloat(item[5])
-		closeTime := int64(item[6].(float64))
+    var rawData [][]interface{}
+    if err := json.Unmarshal(body, &rawData); err != nil {
+        // 当返回为对象（错误）时会失败，直接回退到OKX
+        return nil, err
+    }
 
-		klines[i] = Kline{
-			OpenTime:  openTime,
-			Open:      open,
-			High:      high,
-			Low:       low,
-			Close:     close,
-			Volume:    volume,
-			CloseTime: closeTime,
-		}
-	}
+    klines := make([]Kline, len(rawData))
+    for i, item := range rawData {
+        openTime := int64(item[0].(float64))
+        open, _ := parseFloat(item[1])
+        high, _ := parseFloat(item[2])
+        low, _ := parseFloat(item[3])
+        close, _ := parseFloat(item[4])
+        volume, _ := parseFloat(item[5])
+        closeTime := int64(item[6].(float64))
 
-	return klines, nil
+        klines[i] = Kline{
+            OpenTime:  openTime,
+            Open:      open,
+            High:      high,
+            Low:       low,
+            Close:     close,
+            Volume:    volume,
+            CloseTime: closeTime,
+        }
+    }
+    return klines, nil
+}
+
+// fetchOKXKlines 获取 OKX K线（公开行情）
+func fetchOKXKlines(symbol, interval string, limit int) ([]Kline, error) {
+    instID := toOKXInstID(symbol)
+    bar := interval
+    if strings.HasSuffix(interval, "h") || strings.HasSuffix(interval, "H") {
+        // OKX使用大写H
+        bar = strings.ToUpper(interval)
+    }
+    url := fmt.Sprintf("https://www.okx.com/api/v5/market/candles?instId=%s&bar=%s&limit=%d", instID, bar, limit)
+
+    resp, err := http.Get(url)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
+
+    var payload struct {
+        Code string          `json:"code"`
+        Msg  string          `json:"msg"`
+        Data [][]interface{} `json:"data"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+        return nil, err
+    }
+    if payload.Code != "0" || len(payload.Data) == 0 {
+        return nil, fmt.Errorf("OKX K线接口错误: code=%s msg=%s", payload.Code, payload.Msg)
+    }
+
+    // OKX返回最新在前，需要反转为时间升序
+    rawData := payload.Data
+    for i, j := 0, len(rawData)-1; i < j; i, j = i+1, j-1 {
+        rawData[i], rawData[j] = rawData[j], rawData[i]
+    }
+
+    klines := make([]Kline, len(rawData))
+    for i, item := range rawData {
+        // OKX字段: [ts, o, h, l, c, vol, volCcy, volCcyQuote, confirm]
+        openTime, _ := parseFloat(item[0])
+        open, _ := parseFloat(item[1])
+        high, _ := parseFloat(item[2])
+        low, _ := parseFloat(item[3])
+        close, _ := parseFloat(item[4])
+        volume, _ := parseFloat(item[5])
+        closeTime := int64(openTime) // OKX未提供closeTime，使用openTime近似
+
+        klines[i] = Kline{
+            OpenTime:  int64(openTime),
+            Open:      open,
+            High:      high,
+            Low:       low,
+            Close:     close,
+            Volume:    volume,
+            CloseTime: closeTime,
+        }
+    }
+    return klines, nil
+}
+
+// toOKXInstID 将标准化符号转换为OKX instId（永续）
+// 例: BTCUSDT -> BTC-USDT-SWAP；OKBUSDT -> OKB-USDT-SWAP
+func toOKXInstID(symbol string) string {
+    s := strings.ToUpper(symbol)
+    if strings.HasSuffix(s, "USDT") {
+        base := strings.TrimSuffix(s, "USDT")
+        return base + "-USDT-SWAP"
+    }
+    return s + "-SWAP"
 }
 
 // calculateEMA 计算EMA

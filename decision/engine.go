@@ -90,27 +90,27 @@ type FullDecision struct {
 }
 
 // GetFullDecision 获取AI的完整交易决策（批量分析所有币种和持仓）
-func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error) {
-	// 1. 为所有币种获取市场数据
-	if err := fetchMarketDataForContext(ctx); err != nil {
-		return nil, fmt.Errorf("获取市场数据失败: %w", err)
-	}
+func GetFullDecision(ctx *Context) (*FullDecision, error) {
+    // 1. 为所有币种获取市场数据
+    if err := fetchMarketDataForContext(ctx); err != nil {
+        return nil, fmt.Errorf("failed to fetch market data: %w", err)
+    }
 
 	// 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
 	systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
 	userPrompt := buildUserPrompt(ctx)
 
 	// 3. 调用AI API（使用 system + user prompt）
-	aiResponse, err := mcpClient.CallWithMessages(systemPrompt, userPrompt)
-	if err != nil {
-		return nil, fmt.Errorf("调用AI API失败: %w", err)
-	}
+    aiResponse, err := mcp.CallWithMessages(systemPrompt, userPrompt)
+    if err != nil {
+        return nil, fmt.Errorf("failed to call AI API: %w", err)
+    }
 
 	// 4. 解析AI响应
-	decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
-	if err != nil {
-		return nil, fmt.Errorf("解析AI响应失败: %w", err)
-	}
+    decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+    if err != nil {
+        return nil, fmt.Errorf("failed to parse AI response: %w", err)
+    }
 
 	decision.Timestamp = time.Now()
 	decision.UserPrompt = userPrompt // 保存输入prompt
@@ -161,12 +161,12 @@ func fetchMarketDataForContext(ctx *Context) error {
 			// 计算持仓价值（USD）= 持仓量 × 当前价格
 			oiValue := data.OpenInterest.Latest * data.CurrentPrice
 			oiValueInMillions := oiValue / 1_000_000 // 转换为百万美元单位
-			if oiValueInMillions < 15 {
-				log.Printf("⚠️  %s 持仓价值过低(%.2fM USD < 15M)，跳过此币种 [持仓量:%.0f × 价格:%.4f]",
-					symbol, oiValueInMillions, data.OpenInterest.Latest, data.CurrentPrice)
-				continue
-			}
-		}
+            if oiValueInMillions < 15 {
+                log.Printf("%s OI value too low (%.2fM USD < 15M), skipping [OI:%.0f × Price:%.4f]",
+                    symbol, oiValueInMillions, data.OpenInterest.Latest, data.CurrentPrice)
+                continue
+            }
+        }
 
 		ctx.MarketDataMap[symbol] = data
 	}

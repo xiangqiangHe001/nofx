@@ -5,640 +5,467 @@ import (
     "crypto/sha256"
     "encoding/base64"
     "encoding/json"
-    "errors"
     "fmt"
     "io"
     "net/http"
-    "net/url"
     "strings"
+    "sync"
     "time"
 )
 
-// OKXTrader OKX交易平台实现
+// OKXTrader OKX永续合约交易器（最小实现，优先支持DryRun与价格获取）
 type OKXTrader struct {
     apiKey     string
     secretKey  string
     passphrase string
     client     *http.Client
     baseURL    string
+
+    // 简单缓存
+    cachedBalance     map[string]interface{}
+    balanceCacheTime  time.Time
+    cachedPositions   []map[string]interface{}
+    positionsCacheTime time.Time
+
+    // 合约面值缓存
+    ctValCache map[string]float64
+    cacheMu    sync.RWMutex
 }
 
 // NewOKXTrader 创建OKX交易器
 func NewOKXTrader(apiKey, secretKey, passphrase string) (*OKXTrader, error) {
-    if apiKey == "" || secretKey == "" || passphrase == "" {
-        return nil, fmt.Errorf("缺少OKX凭据")
-    }
     return &OKXTrader{
         apiKey:     apiKey,
         secretKey:  secretKey,
         passphrase: passphrase,
-        client:     &http.Client{Timeout: 15 * time.Second},
+        // 使用系统环境代理（HTTP_PROXY/HTTPS_PROXY），便于与 okx.py 的代理配置保持一致
+        client: &http.Client{Timeout: 20 * time.Second, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}},
         baseURL:    "https://www.okx.com",
+        ctValCache: make(map[string]float64),
     }, nil
 }
 
-// sign 生成 OKX REST v5 签名
-func (t *OKXTrader) sign(ts, method, requestPath, body string) string {
-    msg := ts + strings.ToUpper(method) + requestPath + body
-    mac := hmac.New(sha256.New, []byte(t.secretKey))
-    mac.Write([]byte(msg))
-    return base64.StdEncoding.EncodeToString(mac.Sum(nil))
-}
+// ===== Trader 接口实现 =====
 
-// doRequest 执行私有请求（GET）
-func (t *OKXTrader) doRequest(method, path string, query map[string]string) ([]byte, error) {
-    // 构造URL与query
-    u, _ := url.Parse(t.baseURL)
-    u.Path = path
-    q := u.Query()
-    for k, v := range query {
-        q.Set(k, v)
+// GetBalance 获取账户余额（私有接口，如果未配置密钥返回错误以便上层容错）
+func (o *OKXTrader) GetBalance() (map[string]interface{}, error) {
+    if o.apiKey == "" || o.secretKey == "" || o.passphrase == "" {
+        return nil, fmt.Errorf("OKX API keys are not configured")
     }
-    u.RawQuery = q.Encode()
-
-    ts := time.Now().UTC().Format(time.RFC3339)
-    // 注意签名使用 requestPath + "?" + query（若有）
-    requestPath := path
-    if u.RawQuery != "" {
-        requestPath = requestPath + "?" + u.RawQuery
+    // 缓存60秒
+    if o.cachedBalance != nil && time.Since(o.balanceCacheTime) < 60*time.Second {
+        return o.cachedBalance, nil
     }
-    sign := t.sign(ts, method, requestPath, "")
 
-    req, _ := http.NewRequest(method, u.String(), nil)
-    req.Header.Set("OK-ACCESS-KEY", t.apiKey)
-    req.Header.Set("OK-ACCESS-SIGN", sign)
-    req.Header.Set("OK-ACCESS-TIMESTAMP", ts)
-    req.Header.Set("OK-ACCESS-PASSPHRASE", t.passphrase)
-    req.Header.Set("Content-Type", "application/json")
-
-    resp, err := t.client.Do(req)
+    path := "/api/v5/account/balance"
+    body := ""
+    respBody, err := o.doSignedRequest("GET", path, body)
     if err != nil {
-        return nil, err
-    }
-    defer resp.Body.Close()
-    body, err := io.ReadAll(resp.Body)
-    if err != nil {
-        return nil, err
-    }
-    if resp.StatusCode != http.StatusOK {
-        return body, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-    }
-    return body, nil
-}
-
-// doRequestJSON 执行带JSON主体的私有请求（POST/DELETE等）
-func (t *OKXTrader) doRequestJSON(method, path string, query map[string]string, bodyObj map[string]interface{}) ([]byte, error) {
-    // 构造URL与query
-    u, _ := url.Parse(t.baseURL)
-    u.Path = path
-    q := u.Query()
-    for k, v := range query {
-        q.Set(k, v)
-    }
-    u.RawQuery = q.Encode()
-
-    // 编码JSON主体
-    var bodyStr string
-    if bodyObj != nil {
-        b, _ := json.Marshal(bodyObj)
-        bodyStr = string(b)
-    } else {
-        bodyStr = ""
+        return nil, fmt.Errorf("failed to get account balance: %w", err)
     }
 
-    ts := time.Now().UTC().Format(time.RFC3339)
-    requestPath := path
-    if u.RawQuery != "" {
-        requestPath = requestPath + "?" + u.RawQuery
-    }
-    sign := t.sign(ts, method, requestPath, bodyStr)
-
-    req, _ := http.NewRequest(method, u.String(), strings.NewReader(bodyStr))
-    req.Header.Set("OK-ACCESS-KEY", t.apiKey)
-    req.Header.Set("OK-ACCESS-SIGN", sign)
-    req.Header.Set("OK-ACCESS-TIMESTAMP", ts)
-    req.Header.Set("OK-ACCESS-PASSPHRASE", t.passphrase)
-    req.Header.Set("Content-Type", "application/json")
-
-    resp, err := t.client.Do(req)
-    if err != nil {
-        return nil, err
-    }
-    defer resp.Body.Close()
-    body, err := io.ReadAll(resp.Body)
-    if err != nil {
-        return nil, err
-    }
-    if resp.StatusCode != http.StatusOK {
-        return body, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
-    }
-    return body, nil
-}
-
-// ===== 原始数据获取方法（用于对齐 yuanbao.py） =====
-// GetRawAccountBalance 返回 OKX /api/v5/account/balance 的原始响应
-func (t *OKXTrader) GetRawAccountBalance() (map[string]interface{}, error) {
-    body, err := t.doRequest("GET", "/api/v5/account/balance", map[string]string{})
-    if err != nil {
-        return nil, err
-    }
-    var resp map[string]interface{}
-    if json.Unmarshal(body, &resp) != nil {
-        return nil, fmt.Errorf("账户余额响应解析失败")
-    }
-    return resp, nil
-}
-
-// GetRawPositions 返回 OKX /api/v5/account/positions 的原始响应（默认 SWAP）
-func (t *OKXTrader) GetRawPositions() (map[string]interface{}, error) {
-    body, err := t.doRequest("GET", "/api/v5/account/positions", map[string]string{"instType": "SWAP"})
-    if err != nil {
-        return nil, err
-    }
-    var resp map[string]interface{}
-    if json.Unmarshal(body, &resp) != nil {
-        return nil, fmt.Errorf("持仓响应解析失败")
-    }
-    return resp, nil
-}
-
-// GetRawOpenOrders 返回 OKX /api/v5/trade/orders-pending 的原始响应（可选 instId）
-func (t *OKXTrader) GetRawOpenOrders(instId string) (map[string]interface{}, error) {
-    q := map[string]string{}
-    if strings.TrimSpace(instId) != "" {
-        q["instId"] = instId
-    }
-    body, err := t.doRequest("GET", "/api/v5/trade/orders-pending", q)
-    if err != nil {
-        return nil, err
-    }
-    var resp map[string]interface{}
-    if json.Unmarshal(body, &resp) != nil {
-        return nil, fmt.Errorf("挂单响应解析失败")
-    }
-    return resp, nil
-}
-
-// GetBalance 获取账户余额
-// 映射到系统统一字段：totalWalletBalance, availableBalance, totalUnrealizedProfit
-func (t *OKXTrader) GetBalance() (map[string]interface{}, error) {
-    // 账户余额（统一账户）
-    // 文档: GET /api/v5/account/balance （参见 OKX API Guide）
-    // 若调用失败，返回零值以保证系统运行（配合占位密钥）。
-    body, err := t.doRequest("GET", "/api/v5/account/balance", map[string]string{})
-    if err != nil {
-        // 账户余额失败，尝试资金账户余额作为回退
-        return t.getBalanceFallback()
+    var payload struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            TotalEq string `json:"totalEq"`
+            Details []struct {
+                Ccy      string `json:"ccy"`
+                AvailBal string `json:"availBal"`
+                Eq       string `json:"eq"`
+            } `json:"details"`
+        } `json:"data"`
     }
 
-    var resp map[string]interface{}
-    if json.Unmarshal(body, &resp) != nil {
-        return t.getBalanceFallback()
+    if err := json.Unmarshal(respBody, &payload); err != nil {
+        return nil, fmt.Errorf("failed to parse balance response: %w")
+    }
+    if payload.Code != "0" || len(payload.Data) == 0 {
+        return nil, fmt.Errorf("OKX balance API error: code=%s msg=%s", payload.Code, payload.Msg)
     }
 
-    code, _ := resp["code"].(string)
-    if code != "0" {
-        return t.getBalanceFallback()
-    }
+    // 总净值
+    totalEq := parseFloat(payload.Data[0].TotalEq)
 
-    data, _ := resp["data"].([]interface{})
+    // 可用余额（优先USDT）
+    available := 0.0
     wallet := 0.0
-    avail := 0.0
-    unreal := 0.0
-    if len(data) > 0 {
-        first, _ := data[0].(map[string]interface{})
-        // totalEq（账户总净值）
-        if v, ok := first["totalEq"].(string); ok {
-            if f, e := parseFloat(v); e == nil {
-                wallet = f
-            }
-        }
-        // details 列出各币种余额（取 USDT 的 availBal/cashBal）
-        if details, ok := first["details"].([]interface{}); ok {
-            for _, d := range details {
-                dm, _ := d.(map[string]interface{})
-                if dm["ccy"] == "USDT" {
-                    // 参考 yuanbao.py：取 USDT 的可用余额最大值（availBal/cashBal/bal）
-                    usdtAvail := 0.0
-                    if v, ok := dm["availBal"].(string); ok {
-                        if f, e := parseFloat(v); e == nil {
-                            if f > usdtAvail { usdtAvail = f }
-                        }
-                    }
-                    if v, ok := dm["cashBal"].(string); ok {
-                        if f, e := parseFloat(v); e == nil {
-                            if f > usdtAvail { usdtAvail = f }
-                        }
-                    }
-                    if v, ok := dm["bal"].(string); ok { // 某些场景返回总余额 bal
-                        if f, e := parseFloat(v); e == nil {
-                            if f > usdtAvail { usdtAvail = f }
-                        }
-                    }
-                    avail = usdtAvail
-
-                    // unrealized pnl（如未提供则为0）
-                    if v, ok := dm["upl"].(string); ok {
-                        if f, e := parseFloat(v); e == nil {
-                            unreal = f
-                        }
-                    }
-                }
-            }
+    for _, d := range payload.Data[0].Details {
+        if d.Ccy == "USDT" {
+            available = parseFloat(d.AvailBal)
+            wallet = parseFloat(d.Eq)
+            break
         }
     }
-
-    // 若USDT可用余额仍为0，尝试资金账户余额作为回退
-    if avail <= 0 {
-        fb, _ := t.getBalanceFallback()
-        return fb, nil
+    if wallet == 0 { // 回退：用总净值作为钱包近似
+        wallet = totalEq
     }
 
-    return map[string]interface{}{
+    result := map[string]interface{}{
         "totalWalletBalance":    wallet,
-        "availableBalance":      avail,
-        "totalUnrealizedProfit": unreal,
-    }, nil
+        "availableBalance":      available,
+        "totalUnrealizedProfit": 0.0, // 未实现盈亏由持仓计算
+    }
+    o.cachedBalance = result
+    o.balanceCacheTime = time.Now()
+    return result, nil
 }
 
-// GetPositions 获取所有持仓（统一字段）
-func (t *OKXTrader) GetPositions() ([]map[string]interface{}, error) {
-    // 文档: GET /api/v5/account/positions
-    body, err := t.doRequest("GET", "/api/v5/account/positions", map[string]string{
-        "instType": "SWAP",
-    })
-    if err != nil {
-        return []map[string]interface{}{}, nil
+// GetPositions 获取所有持仓
+func (o *OKXTrader) GetPositions() ([]map[string]interface{}, error) {
+    if o.apiKey == "" || o.secretKey == "" || o.passphrase == "" {
+        return nil, fmt.Errorf("OKX API keys are not configured")
+    }
+    // 缓存30秒
+    if o.cachedPositions != nil && time.Since(o.positionsCacheTime) < 30*time.Second {
+        return o.cachedPositions, nil
     }
 
-    var resp map[string]interface{}
-    if json.Unmarshal(body, &resp) != nil {
-        return []map[string]interface{}{}, nil
+    path := "/api/v5/account/positions?instType=SWAP"
+    body := ""
+    respBody, err := o.doSignedRequest("GET", path, body)
+    if err != nil {
+        return nil, fmt.Errorf("failed to get positions: %w")
     }
-    code, _ := resp["code"].(string)
-    if code != "0" {
-        return []map[string]interface{}{}, nil
+
+    var payload struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            InstID  string `json:"instId"`
+            Pos     string `json:"pos"`
+            PosSide string `json:"posSide"`
+            AvgPx   string `json:"avgPx"`
+            Lever   string `json:"lever"`
+            Upl     string `json:"upl"`
+            LiqPx   string `json:"liqPx"`
+        } `json:"data"`
     }
-    data, _ := resp["data"].([]interface{})
-    out := make([]map[string]interface{}, 0, len(data))
-    for _, it := range data {
-        m, _ := it.(map[string]interface{})
-        instId, _ := m["instId"].(string)
-        posSide, _ := m["posSide"].(string) // long/short
-        side := "long"
-        if strings.ToLower(posSide) == "short" {
-            side = "short"
-        }
-        qty := parseStringFloat(m["pos"])        // 张或数量
-        if qty == 0 {
-            // 仅返回非零持仓，参考 yuanbao.py 的逻辑
+    if err := json.Unmarshal(respBody, &payload); err != nil {
+        return nil, fmt.Errorf("failed to parse positions response: %w")
+    }
+    if payload.Code != "0" {
+        return nil, fmt.Errorf("OKX positions API error: code=%s msg=%s", payload.Code, payload.Msg)
+    }
+
+    var result []map[string]interface{}
+    for _, p := range payload.Data {
+        qtyContracts := parseFloat(p.Pos)
+        if qtyContracts == 0 {
             continue
         }
-        entry := parseStringFloat(m["avgPx"])    // 开仓均价
-        mark := parseStringFloat(m["markPx"])    // 标记价格
-        lev := parseStringFloat(m["lever"])      // 杠杆
-        liq := parseStringFloat(m["liqPx"])      // 强平价
 
-        out = append(out, map[string]interface{}{
-            "symbol":            instId,
-            "side":              side,
-            "positionAmt":       qty,
-            "entryPrice":        entry,
-            "markPrice":         mark,
-            "leverage":          lev,
-            "liquidationPrice":  liq,
+        // 获取合约面值ctVal用于换算数量到标的单位
+        ctVal := o.getCTVal(p.InstID)
+        qty := qtyContracts * ctVal
+
+        // 获取标记价格（使用ticker的last）
+        markPrice, _ := o.GetMarketPrice(fromOKXInstID(p.InstID))
+
+        entry := parseFloat(p.AvgPx)
+        lev := parseFloat(p.Lever)
+        upl := parseFloat(p.Upl)
+        liq := parseFloat(p.LiqPx)
+
+        // 优先使用 posSide 判断方向（双向持仓模式下，pos 始终为正数）
+        side := "long"
+        if strings.EqualFold(p.PosSide, "short") {
+            side = "short"
+        } else if strings.EqualFold(p.PosSide, "long") {
+            side = "long"
+        } else {
+            // 兼容净持仓模式：使用数量符号判断
+            if qtyContracts < 0 {
+                side = "short"
+                qty = -qty
+            }
+        }
+
+        result = append(result, map[string]interface{}{
+            "symbol":           fromOKXInstID(p.InstID),
+            "side":             side,
+            "positionAmt":      qty,
+            "entryPrice":       entry,
+            "markPrice":        markPrice,
+            "unRealizedProfit": upl,
+            "leverage":         lev,
+            "liquidationPrice": liq,
         })
     }
-    return out, nil
+
+    o.cachedPositions = result
+    o.positionsCacheTime = time.Now()
+    return result, nil
 }
 
-// OpenLong 开多仓（市价单，cross模式，支持预设杠杆）
-func (t *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
-    instId := toOKXInstID(symbol)
-    if leverage > 0 {
-        _ = t.SetLeverage(instId, leverage)
+// OpenLong 开多仓
+func (o *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
+    if o.apiKey == "" || o.secretKey == "" || o.passphrase == "" {
+        return nil, fmt.Errorf("OKX未配置API密钥")
     }
-    params := map[string]interface{}{
-        "instId": instId,
-        "tdMode": "cross",
-        "side":   "buy",
-        "ordType": "market",
-        "sz":     formatSize(quantity),
+    instID := toOKXInstID(symbol)
+    // 设置杠杆（容错，不阻塞下单）
+    _ = o.SetLeverage(symbol, leverage)
+
+    // 计算合约张数
+    ctVal := o.getCTVal(instID)
+    if ctVal <= 0 {
+        ctVal = 1.0
     }
-    body, err := t.doRequestJSON("POST", "/api/v5/trade/order", nil, params)
+    contracts := quantity / ctVal
+    if contracts <= 0 {
+        return nil, fmt.Errorf("下单数量过小")
+    }
+    // OKX张数按整数或最小增量处理（保守：四舍五入到3位小数）
+    sz := fmt.Sprintf("%.3f", contracts)
+
+    payload := fmt.Sprintf(`{"instId":"%s","tdMode":"cross","side":"buy","ordType":"market","sz":"%s"}`, instID, sz)
+    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order", payload)
     if err != nil {
         return nil, err
     }
-    return parseOrderResponse(body)
+    var resp struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct { OrdID string `json:"ordId"` } `json:"data"`
+    }
+    if err := json.Unmarshal(respBody, &resp); err != nil {
+        return nil, fmt.Errorf("解析下单响应失败: %w", err)
+    }
+    if resp.Code != "0" {
+        return nil, fmt.Errorf("OKX下单失败: code=%s msg=%s", resp.Code, resp.Msg)
+    }
+    result := map[string]interface{}{"orderId": resp.Data[0].OrdID}
+    return result, nil
 }
 
-// OpenShort 开空仓（市价单，cross模式，支持预设杠杆）
-func (t *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
-    instId := toOKXInstID(symbol)
-    if leverage > 0 {
-        _ = t.SetLeverage(instId, leverage)
+// OpenShort 开空仓
+func (o *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
+    if o.apiKey == "" || o.secretKey == "" || o.passphrase == "" {
+        return nil, fmt.Errorf("OKX未配置API密钥")
     }
-    params := map[string]interface{}{
-        "instId": instId,
-        "tdMode": "cross",
-        "side":   "sell",
-        "ordType": "market",
-        "sz":     formatSize(quantity),
-    }
-    body, err := t.doRequestJSON("POST", "/api/v5/trade/order", nil, params)
-    if err != nil {
-        return nil, err
-    }
-    return parseOrderResponse(body)
-}
+    instID := toOKXInstID(symbol)
+    _ = o.SetLeverage(symbol, leverage)
 
-// CloseLong 平多仓（reduceOnly市价单）
-func (t *OKXTrader) CloseLong(symbol string, quantity float64) (map[string]interface{}, error) {
-    instId := toOKXInstID(symbol)
-    // 数量为0时，自动查询当前多仓数量，并根据持仓的保证金模式设置 tdMode
-    tdMode := "cross"
-    posSide := "long"
-    if quantity == 0 {
-        raw, err := t.GetRawPositions()
-        if err == nil && raw != nil {
-            data, _ := raw["data"].([]interface{})
-            for _, it := range data {
-                m, _ := it.(map[string]interface{})
-                if m["instId"] == instId {
-                    side, _ := m["posSide"].(string)
-                    if strings.ToLower(side) != "long" {
-                        continue
-                    }
-                    qty := parseStringFloat(m["pos"])
-                    if qty > 0 {
-                        quantity = qty
-                        posSide = side
-                        if mm, _ := m["mgnMode"].(string); mm != "" {
-                            if strings.ToLower(mm) == "isolated" { tdMode = "isolated" } else { tdMode = "cross" }
-                        }
-                        break
-                    }
-                }
-            }
-        }
-        if quantity == 0 { return nil, fmt.Errorf("没有找到 %s 的多仓", instId) }
-    }
-    params := map[string]interface{}{
-        "instId":     instId,
-        "tdMode":     tdMode,
-        "side":       "sell",
-        "ordType":    "market",
-        "sz":         formatSize(quantity),
-        "reduceOnly": "true",
-    }
-    // 仅在对冲模式下传递 posSide；净持仓模式应省略
-    if strings.ToLower(posSide) == "long" || strings.ToLower(posSide) == "short" {
-        params["posSide"] = "long"
-    }
-    body, err := t.doRequestJSON("POST", "/api/v5/trade/order", nil, params)
+    ctVal := o.getCTVal(instID)
+    if ctVal <= 0 { ctVal = 1.0 }
+    contracts := quantity / ctVal
+    if contracts <= 0 { return nil, fmt.Errorf("下单数量过小") }
+    sz := fmt.Sprintf("%.3f", contracts)
+
+    payload := fmt.Sprintf(`{"instId":"%s","tdMode":"cross","side":"sell","ordType":"market","sz":"%s"}`, instID, sz)
+    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order", payload)
     if err != nil { return nil, err }
-    return parseOrderResponse(body)
+    var resp struct { Code string `json:"code"`; Msg string `json:"msg"`; Data []struct{ OrdID string `json:"ordId"` } `json:"data"` }
+    if err := json.Unmarshal(respBody, &resp); err != nil { return nil, fmt.Errorf("解析下单响应失败: %w", err) }
+    if resp.Code != "0" { return nil, fmt.Errorf("OKX下单失败: code=%s msg=%s", resp.Code, resp.Msg) }
+    return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
 }
 
-// CloseShort 平空仓（reduceOnly市价单）
-func (t *OKXTrader) CloseShort(symbol string, quantity float64) (map[string]interface{}, error) {
-    instId := toOKXInstID(symbol)
-    tdMode := "cross"
-    posSide := "short"
-    if quantity == 0 {
-        raw, err := t.GetRawPositions()
-        if err == nil && raw != nil {
-            data, _ := raw["data"].([]interface{})
-            for _, it := range data {
-                m, _ := it.(map[string]interface{})
-                if m["instId"] == instId {
-                    side, _ := m["posSide"].(string)
-                    if strings.ToLower(side) != "short" {
-                        continue
-                    }
-                    qty := parseStringFloat(m["pos"])
-                    if qty > 0 {
-                        quantity = qty
-                        posSide = side
-                        if mm, _ := m["mgnMode"].(string); mm != "" {
-                            if strings.ToLower(mm) == "isolated" { tdMode = "isolated" } else { tdMode = "cross" }
-                        }
-                        break
-                    }
-                }
-            }
-        }
-        if quantity == 0 { return nil, fmt.Errorf("没有找到 %s 的空仓", instId) }
+// CloseLong 平多仓
+func (o *OKXTrader) CloseLong(symbol string, quantity float64) (map[string]interface{}, error) {
+    if o.apiKey == "" || o.secretKey == "" || o.passphrase == "" {
+        return nil, fmt.Errorf("OKX未配置API密钥")
     }
-    params := map[string]interface{}{
-        "instId":     instId,
-        "tdMode":     tdMode,
-        "side":       "buy",
-        "ordType":    "market",
-        "sz":         formatSize(quantity),
-        "reduceOnly": "true",
-    }
-    if strings.ToLower(posSide) == "long" || strings.ToLower(posSide) == "short" {
-        params["posSide"] = "short"
-    }
-    body, err := t.doRequestJSON("POST", "/api/v5/trade/order", nil, params)
+    instID := toOKXInstID(symbol)
+    ctVal := o.getCTVal(instID)
+    if ctVal <= 0 { ctVal = 1.0 }
+    contracts := quantity / ctVal
+    if contracts <= 0 { return nil, fmt.Errorf("下单数量过小") }
+    sz := fmt.Sprintf("%.3f", contracts)
+
+    payload := fmt.Sprintf(`{"instId":"%s","tdMode":"cross","side":"sell","ordType":"market","sz":"%s","reduceOnly":"true"}`, instID, sz)
+    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order", payload)
     if err != nil { return nil, err }
-    return parseOrderResponse(body)
+    var resp struct { Code string `json:"code"`; Msg string `json:"msg"`; Data []struct{ OrdID string `json:"ordId"` } `json:"data"` }
+    if err := json.Unmarshal(respBody, &resp); err != nil { return nil, fmt.Errorf("解析下单响应失败: %w", err) }
+    if resp.Code != "0" { return nil, fmt.Errorf("OKX平仓失败: code=%s msg=%s", resp.Code, resp.Msg) }
+    return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
 }
 
-// SetLeverage 设置杠杆（官方私有API）
-func (t *OKXTrader) SetLeverage(symbol string, leverage int) error {
-    instId := toOKXInstID(symbol)
-    // 默认 cross；若存在该合约持仓，则依持仓的保证金模式与posSide设置
-    mgnMode := "cross"
-    posSide := ""
-    if raw, err := t.GetRawPositions(); err == nil && raw != nil {
-        if data, ok := raw["data"].([]interface{}); ok {
-            for _, it := range data {
-                m, _ := it.(map[string]interface{})
-                if m["instId"] == instId {
-                    if mm, _ := m["mgnMode"].(string); mm != "" {
-                        mgnMode = strings.ToLower(mm)
-                    }
-                    ps, _ := m["posSide"].(string)
-                    posSide = strings.ToLower(ps)
-                    break
-                }
-            }
-        }
+// CloseShort 平空仓
+func (o *OKXTrader) CloseShort(symbol string, quantity float64) (map[string]interface{}, error) {
+    if o.apiKey == "" || o.secretKey == "" || o.passphrase == "" {
+        return nil, fmt.Errorf("OKX未配置API密钥")
     }
-    params := map[string]interface{}{
-        "instId": instId,
-        "mgnMode": mgnMode,
-        "lever":  fmt.Sprintf("%d", leverage),
-    }
-    // 在 isolated + 对冲模式下，OKX要求传入 posSide（long/short）；净持仓不传
-    if mgnMode == "isolated" && (posSide == "long" || posSide == "short") {
-        params["posSide"] = posSide
-    }
-    body, err := t.doRequestJSON("POST", "/api/v5/account/set-leverage", nil, params)
+    instID := toOKXInstID(symbol)
+    ctVal := o.getCTVal(instID)
+    if ctVal <= 0 { ctVal = 1.0 }
+    contracts := quantity / ctVal
+    if contracts <= 0 { return nil, fmt.Errorf("下单数量过小") }
+    sz := fmt.Sprintf("%.3f", contracts)
+
+    payload := fmt.Sprintf(`{"instId":"%s","tdMode":"cross","side":"buy","ordType":"market","sz":"%s","reduceOnly":"true"}`, instID, sz)
+    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order", payload)
+    if err != nil { return nil, err }
+    var resp struct { Code string `json:"code"`; Msg string `json:"msg"`; Data []struct{ OrdID string `json:"ordId"` } `json:"data"` }
+    if err := json.Unmarshal(respBody, &resp); err != nil { return nil, fmt.Errorf("解析下单响应失败: %w", err) }
+    if resp.Code != "0" { return nil, fmt.Errorf("OKX平仓失败: code=%s msg=%s", resp.Code, resp.Msg) }
+    return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
+}
+
+// SetLeverage 设置杠杆
+func (o *OKXTrader) SetLeverage(symbol string, leverage int) error {
+    instID := toOKXInstID(symbol)
+    payload := fmt.Sprintf(`{"instId":"%s","lever":"%d","mgnMode":"cross"}`, instID, leverage)
+    respBody, err := o.doSignedRequest("POST", "/api/v5/account/set-leverage", payload)
     if err != nil { return err }
-    var resp map[string]interface{}
-    if json.Unmarshal(body, &resp) == nil {
-        if code, _ := resp["code"].(string); code == "0" { return nil }
-        return fmt.Errorf("OKX SetLeverage失败: %v", resp)
-    }
-    return fmt.Errorf("OKX SetLeverage解析失败")
-}
-
-// GetMarketPrice 获取市场最新价
-func (t *OKXTrader) GetMarketPrice(symbol string) (float64, error) {
-    instId := toOKXInstID(symbol)
-    body, err := t.doRequest("GET", "/api/v5/market/ticker", map[string]string{"instId": instId})
-    if err != nil { return 0, err }
-    var resp map[string]interface{}
-    if json.Unmarshal(body, &resp) != nil { return 0, fmt.Errorf("价格响应解析失败") }
-    if code, _ := resp["code"].(string); code != "0" { return 0, fmt.Errorf("OKX价格API错误: %s", code) }
-    data, _ := resp["data"].([]interface{})
-    if len(data) == 0 { return 0, fmt.Errorf("无ticker数据") }
-    first, _ := data[0].(map[string]interface{})
-    price := parseStringFloat(first["last"])
-    if price <= 0 { price = parseStringFloat(first["askPx"]) }
-    if price <= 0 { price = parseStringFloat(first["bidPx"]) }
-    if price <= 0 { return 0, fmt.Errorf("无有效价格") }
-    return price, nil
-}
-
-// CancelAllOrders 取消该instId的所有挂单
-func (t *OKXTrader) CancelAllOrders(symbol string) error {
-    instId := toOKXInstID(symbol)
-    // 列出未成交订单
-    body, err := t.doRequest("GET", "/api/v5/trade/orders-pending", map[string]string{"instId": instId})
-    if err != nil { return err }
-    var resp map[string]interface{}
-    if json.Unmarshal(body, &resp) != nil { return fmt.Errorf("pending订单解析失败") }
-    if code, _ := resp["code"].(string); code != "0" { return nil }
-    data, _ := resp["data"].([]interface{})
-    for _, d := range data {
-        m, _ := d.(map[string]interface{})
-        ordId, _ := m["ordId"].(string)
-        if ordId == "" { continue }
-        cancelBody := map[string]interface{}{"instId": instId, "ordId": ordId}
-        _, _ = t.doRequestJSON("POST", "/api/v5/trade/cancel-order", nil, cancelBody)
-    }
+    var resp struct { Code string `json:"code"`; Msg string `json:"msg"` }
+    if err := json.Unmarshal(respBody, &resp); err != nil { return fmt.Errorf("解析设置杠杆响应失败: %w", err) }
+    if resp.Code != "0" { return fmt.Errorf("设置杠杆失败: code=%s msg=%s", resp.Code, resp.Msg) }
     return nil
 }
 
-// SetStopLoss/SetTakeProfit 暂不实现（OKX条件单较复杂，出于范围）
-func (t *OKXTrader) SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error {
-    return errors.New("OKX SetStopLoss 暂未实现")
-}
-func (t *OKXTrader) SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error {
-    return errors.New("OKX SetTakeProfit 暂未实现")
-}
-
-// FormatQuantity 格式化数量到正确的精度（简单返回字符串）
-func (t *OKXTrader) FormatQuantity(symbol string, quantity float64) (string, error) {
-    return fmt.Sprintf("%f", quantity), nil
-}
-
-// parseFloat 安全解析字符串为浮点数
-func parseFloat(s string) (float64, error) {
-    var f float64
-    _, err := fmt.Sscanf(s, "%f", &f)
+// GetMarketPrice 获取市场价格（使用OKX公开行情）
+func (o *OKXTrader) GetMarketPrice(symbol string) (float64, error) {
+    instID := toOKXInstID(symbol)
+    url := fmt.Sprintf("%s/api/v5/market/ticker?instId=%s", o.baseURL, instID)
+    resp, err := o.client.Get(url)
     if err != nil {
         return 0, err
     }
-    return f, nil
+    defer resp.Body.Close()
+
+    var payload struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            Last string `json:"last"`
+        } `json:"data"`
+    }
+
+    if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+        return 0, err
+    }
+    if payload.Code != "0" || len(payload.Data) == 0 {
+        return 0, fmt.Errorf("OKX ticker API error: code=%s msg=%s", payload.Code, payload.Msg)
+    }
+    return parseFloat(payload.Data[0].Last), nil
 }
 
-func parseStringFloat(v interface{}) float64 {
-    if v == nil {
-        return 0
-    }
-    if s, ok := v.(string); ok {
-        if f, err := parseFloat(s); err == nil {
-            return f
-        }
-    }
-    return 0
+// SetStopLoss 设置止损
+func (o *OKXTrader) SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error {
+    return fmt.Errorf("OKX止损暂未实现")
 }
 
-// getBalanceFallback 使用资金账户API作为回退，获取USDT余额
-// 文档: GET /api/v5/asset/balances?ccy=USDT
-func (t *OKXTrader) getBalanceFallback() (map[string]interface{}, error) {
-    body, err := t.doRequest("GET", "/api/v5/asset/balances", map[string]string{"ccy": "USDT"})
-    if err != nil {
-        return map[string]interface{}{
-            "totalWalletBalance":    0.0,
-            "availableBalance":      0.0,
-            "totalUnrealizedProfit": 0.0,
-        }, nil
-    }
-    var resp map[string]interface{}
-    if json.Unmarshal(body, &resp) != nil {
-        return map[string]interface{}{
-            "totalWalletBalance":    0.0,
-            "availableBalance":      0.0,
-            "totalUnrealizedProfit": 0.0,
-        }, nil
-    }
-    code, _ := resp["code"].(string)
-    if code != "0" {
-        return map[string]interface{}{
-            "totalWalletBalance":    0.0,
-            "availableBalance":      0.0,
-            "totalUnrealizedProfit": 0.0,
-        }, nil
-    }
-    data, _ := resp["data"].([]interface{})
-    usdt := 0.0
-    if len(data) > 0 {
-        for _, d := range data {
-            dm, _ := d.(map[string]interface{})
-            if dm["ccy"] == "USDT" {
-                usdt = parseStringFloat(dm["bal"]) // 资金账户余额字段为 bal
-                break
-            }
-        }
-    }
-    return map[string]interface{}{
-        "totalWalletBalance":    usdt,
-        "availableBalance":      usdt,
-        "totalUnrealizedProfit": 0.0,
-    }, nil
+// SetTakeProfit 设置止盈
+func (o *OKXTrader) SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error {
+    return fmt.Errorf("OKX止盈暂未实现")
+}
+
+// CancelAllOrders 取消所有挂单
+func (o *OKXTrader) CancelAllOrders(symbol string) error {
+    return fmt.Errorf("OKX取消挂单暂未实现")
+}
+
+// FormatQuantity 简单格式化（OKX最小数量因合约不同而异，这里采用保守的3位小数）
+func (o *OKXTrader) FormatQuantity(symbol string, quantity float64) (string, error) {
+    return fmt.Sprintf("%.3f", quantity), nil
 }
 
 // ===== 辅助函数 =====
-func formatSize(qty float64) string {
-    // 简单转换为字符串，不做精度裁剪（可按需求增强）
-    return fmt.Sprintf("%f", qty)
-}
 
+// toOKXInstID 将标准化的Binance符号转换为OKX instId（永续合约）
+// 例: BTCUSDT -> BTC-USDT-SWAP
 func toOKXInstID(symbol string) string {
-    s := strings.TrimSpace(symbol)
-    if s == "" { return "BTC-USDT-SWAP" }
-    // 已是OKX格式
-    if strings.Contains(s, "-") && strings.Contains(s, "SWAP") { return s }
-    // 形如 BTCUSDT -> BTC-USDT-SWAP
-    upper := strings.ToUpper(s)
-    // 简单分割：后四位作为quote（USDT/USDC等），其余作为base
-    if len(upper) > 4 {
-        base := upper[:len(upper)-4]
-        quote := upper[len(upper)-4:]
-        return base + "-" + quote + "-SWAP"
+    s := strings.ToUpper(symbol)
+    if strings.HasSuffix(s, "USDT") {
+        base := strings.TrimSuffix(s, "USDT")
+        return base + "-USDT-SWAP"
     }
-    return s
+    // 回退：直接加 -SWAP
+    return s + "-SWAP"
 }
 
-func parseOrderResponse(body []byte) (map[string]interface{}, error) {
-    var resp map[string]interface{}
-    if json.Unmarshal(body, &resp) != nil { return nil, fmt.Errorf("订单响应解析失败") }
-    code, _ := resp["code"].(string)
-    if code != "0" { return nil, fmt.Errorf("下单失败: %v", resp) }
-    data, _ := resp["data"].([]interface{})
-    out := map[string]interface{}{"success": true}
-    if len(data) > 0 {
-        first, _ := data[0].(map[string]interface{})
-        out["ordId"] = first["ordId"]
-        out["clOrdId"] = first["clOrdId"]
-        out["instId"] = first["instId"]
-        out["state"] = first["state"]
+// fromOKXInstID 将OKX instId转换为标准符号
+func fromOKXInstID(instID string) string {
+    // 例: BTC-USDT-SWAP -> BTCUSDT
+    up := strings.ToUpper(instID)
+    up = strings.TrimSuffix(up, "-SWAP")
+    up = strings.ReplaceAll(up, "-", "")
+    return up
+}
+
+func parseFloat(s string) float64 {
+    var f float64
+    _, _ = fmt.Sscanf(s, "%f", &f)
+    return f
+}
+
+// buildSignature 生成OKX签名（预留）
+func (o *OKXTrader) buildSignature(timestamp, method, path, body string) string {
+    payload := timestamp + method + path + body
+    mac := hmac.New(sha256.New, []byte(o.secretKey))
+    mac.Write([]byte(payload))
+    return base64.StdEncoding.EncodeToString(mac.Sum(nil))
+}
+
+// doSignedRequest 执行签名请求
+func (o *OKXTrader) doSignedRequest(method, path, body string) ([]byte, error) {
+    ts := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+    sig := o.buildSignature(ts, method, path, body)
+
+    var reader io.Reader
+    if method == "POST" || method == "PUT" {
+        reader = strings.NewReader(body)
     }
-    return out, nil
+    req, err := http.NewRequest(method, o.baseURL+path, reader)
+    if err != nil {
+        return nil, err
+    }
+    req.Header.Set("OK-ACCESS-KEY", o.apiKey)
+    req.Header.Set("OK-ACCESS-SIGN", sig)
+    req.Header.Set("OK-ACCESS-TIMESTAMP", ts)
+    req.Header.Set("OK-ACCESS-PASSPHRASE", o.passphrase)
+    req.Header.Set("Content-Type", "application/json")
+
+    resp, err := o.client.Do(req)
+    if err != nil {
+        return nil, err
+    }
+    defer resp.Body.Close()
+    b, err := io.ReadAll(resp.Body)
+    if err != nil {
+        return nil, err
+    }
+    return b, nil
+}
+
+// getCTVal 获取合约面值ctVal（OKX合约规格）
+func (o *OKXTrader) getCTVal(instID string) float64 {
+    o.cacheMu.RLock()
+    v, ok := o.ctValCache[instID]
+    o.cacheMu.RUnlock()
+    if ok && v > 0 {
+        return v
+    }
+
+    url := fmt.Sprintf("%s/api/v5/public/instruments?instType=SWAP&instId=%s", o.baseURL, instID)
+    resp, err := o.client.Get(url)
+    if err != nil {
+        return 1.0
+    }
+    defer resp.Body.Close()
+
+    var payload struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            CtVal string `json:"ctVal"`
+        } `json:"data"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+        return 1.0
+    }
+    if payload.Code != "0" || len(payload.Data) == 0 {
+        return 1.0
+    }
+    ct := parseFloat(payload.Data[0].CtVal)
+    if ct <= 0 {
+        ct = 1.0
+    }
+    o.cacheMu.Lock()
+    o.ctValCache[instID] = ct
+    o.cacheMu.Unlock()
+    return ct
 }

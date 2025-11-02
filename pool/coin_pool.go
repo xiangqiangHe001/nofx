@@ -87,7 +87,7 @@ func SetUseDefaultCoins(useDefault bool) {
 func SetDefaultCoins(coins []string) {
 	if len(coins) > 0 {
 		defaultMainstreamCoins = coins
-		log.Printf("✓ 已设置默认币种池（共%d个币种）: %v", len(coins), coins)
+        log.Printf("Default coin pool set (total %d): %v", len(coins), coins)
 	}
 }
 
@@ -95,13 +95,13 @@ func SetDefaultCoins(coins []string) {
 func GetCoinPool() ([]CoinInfo, error) {
 	// 优先检查是否启用默认币种列表
 	if coinPoolConfig.UseDefaultCoins {
-		log.Printf("✓ 已启用默认主流币种列表")
+        log.Printf("Using default mainstream coin list")
 		return convertSymbolsToCoins(defaultMainstreamCoins), nil
 	}
 
 	// 检查API URL是否配置
 	if strings.TrimSpace(coinPoolConfig.APIURL) == "" {
-		log.Printf("⚠️  未配置币种池API URL，使用默认主流币种列表")
+        log.Printf("Coin pool API URL not configured, using default mainstream list")
 		return convertSymbolsToCoins(defaultMainstreamCoins), nil
 	}
 
@@ -111,18 +111,18 @@ func GetCoinPool() ([]CoinInfo, error) {
 	// 尝试从API获取
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if attempt > 1 {
-			log.Printf("⚠️  第%d次重试获取币种池（共%d次）...", attempt, maxRetries)
+            log.Printf("Retrying to fetch coin pool (%d/%d)...", attempt, maxRetries)
 			time.Sleep(2 * time.Second) // 重试前等待2秒
 		}
 
 		coins, err := fetchCoinPool()
 		if err == nil {
 			if attempt > 1 {
-				log.Printf("✓ 第%d次重试成功", attempt)
+                log.Printf("Retry %d succeeded", attempt)
 			}
 			// 成功获取后保存到缓存
 			if err := saveCoinPoolCache(coins); err != nil {
-				log.Printf("⚠️  保存币种池缓存失败: %v", err)
+                log.Printf("Failed to save coin pool cache: %v", err)
 			}
 			return coins, nil
 		}
@@ -140,13 +140,13 @@ func GetCoinPool() ([]CoinInfo, error) {
 	}
 
 	// 缓存也失败，使用默认主流币种
-	log.Printf("⚠️  无法加载缓存数据（最后错误: %v），使用默认主流币种列表", lastErr)
+    log.Printf("Unable to load cache (last error: %v), using default mainstream list", lastErr)
 	return convertSymbolsToCoins(defaultMainstreamCoins), nil
 }
 
 // fetchCoinPool 实际执行币种池请求
 func fetchCoinPool() ([]CoinInfo, error) {
-	log.Printf("🔄 正在请求AI500币种池...")
+    log.Printf("Requesting AI500 coin pool...")
 
 	client := &http.Client{
 		Timeout: coinPoolConfig.Timeout,
@@ -154,17 +154,17 @@ func fetchCoinPool() ([]CoinInfo, error) {
 
 	resp, err := client.Get(coinPoolConfig.APIURL)
 	if err != nil {
-		return nil, fmt.Errorf("请求币种池API失败: %w", err)
+        return nil, fmt.Errorf("failed to request coin pool API: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("读取响应失败: %w", err)
+        return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API返回错误 (status %d): %s", resp.StatusCode, string(body))
+        return nil, fmt.Errorf("API returned error (status %d): %s", resp.StatusCode, string(body))
 	}
 
 	// 解析API响应
@@ -422,7 +422,7 @@ var oiTopConfig = struct {
 func GetOITopPositions() ([]OIPosition, error) {
 	// 检查API URL是否配置
 	if strings.TrimSpace(oiTopConfig.APIURL) == "" {
-		log.Printf("⚠️  未配置OI Top API URL，跳过OI Top数据获取")
+    log.Printf("OI Top API URL not configured, skipping OI Top data fetch")
 		return []OIPosition{}, nil // 返回空列表，不是错误
 	}
 
@@ -432,7 +432,7 @@ func GetOITopPositions() ([]OIPosition, error) {
 	// 尝试从API获取
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		if attempt > 1 {
-			log.Printf("⚠️  第%d次重试获取OI Top数据（共%d次）...", attempt, maxRetries)
+            log.Printf("Retrying to fetch OI Top data (%d/%d)...", attempt, maxRetries)
 			time.Sleep(2 * time.Second)
 		}
 
@@ -638,8 +638,8 @@ func GetMergedCoinPool(ai500Limit int) (*MergedCoinPool, error) {
 		SymbolSources: symbolSources,
 	}
 
-	log.Printf("📊 币种池合并完成: AI500=%d, OI_Top=%d, 总计(去重)=%d",
-		len(ai500TopSymbols), len(oiTopSymbols), len(allSymbols))
+    log.Printf("Coin pool merge complete: AI500=%d, OI_Top=%d, total(dedup)=%d",
+        len(ai500TopSymbols), len(oiTopSymbols), len(allSymbols))
 
 	return merged, nil
 }
