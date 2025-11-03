@@ -615,13 +615,8 @@ function StatCard({
 
 // Decision Card Component with CoT Trace - Binance Style
 function DecisionCard({ decision, language, analysisEnabled }: { decision: DecisionRecord; language: Language; analysisEnabled?: boolean }) {
-  const [showInputPrompt, setShowInputPrompt] = useState<boolean>(!!analysisEnabled);
-  const [showCoT, setShowCoT] = useState<boolean>(!!analysisEnabled);
-
-  useEffect(() => {
-    setShowInputPrompt(!!analysisEnabled);
-    setShowCoT(!!analysisEnabled);
-  }, [analysisEnabled]);
+  const [showInputPrompt, setShowInputPrompt] = useState<boolean>(false);
+  const [showCoT, setShowCoT] = useState<boolean>(false);
 
   return (
     <div className="rounded p-5 transition-all duration-300 hover:translate-y-[-2px]" style={{ border: '1px solid #2B3139', background: '#1E2329', boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)' }}>

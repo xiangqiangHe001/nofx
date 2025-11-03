@@ -31,6 +31,7 @@ type AutoTraderConfig struct {
     // Hyperliquid配置
     HyperliquidPrivateKey string
     HyperliquidTestnet    bool
+    HyperliquidWalletAddr string
 
     // Aster配置
     AsterUser       string // Aster主钱包地址
@@ -141,12 +142,12 @@ switch config.Exchange {
 case "binance":
 		log.Printf("🏦 [%s] 使用币安合约交易", config.Name)
 		trader = NewFuturesTrader(config.BinanceAPIKey, config.BinanceSecretKey)
-	case "hyperliquid":
-		log.Printf("🏦 [%s] 使用Hyperliquid交易", config.Name)
-		trader, err = NewHyperliquidTrader(config.HyperliquidPrivateKey, config.HyperliquidTestnet)
-		if err != nil {
-			return nil, fmt.Errorf("初始化Hyperliquid交易器失败: %w", err)
-		}
+    case "hyperliquid":
+        log.Printf("🏦 [%s] 使用Hyperliquid交易", config.Name)
+        trader, err = NewHyperliquidTrader(config.HyperliquidPrivateKey, config.HyperliquidTestnet)
+        if err != nil {
+            return nil, fmt.Errorf("初始化Hyperliquid交易器失败: %w", err)
+        }
     case "aster":
         log.Printf("🏦 [%s] 使用Aster交易", config.Name)
         trader, err = NewAsterTrader(config.AsterUser, config.AsterSigner, config.AsterPrivateKey)
@@ -793,21 +794,33 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 	}
 
     return map[string]interface{}{
-		"trader_id":       at.id,
-		"trader_name":     at.name,
-		"ai_model":        at.aiModel,
-		"exchange":        at.exchange,
-		"is_running":      at.isRunning,
-		"start_time":      at.startTime.Format(time.RFC3339),
-		"runtime_minutes": int(time.Since(at.startTime).Minutes()),
-		"call_count":      at.callCount,
-		"initial_balance": at.initialBalance,
-		"scan_interval":   at.config.ScanInterval.String(),
-		"stop_until":      at.stopUntil.Format(time.RFC3339),
-		"last_reset_time": at.lastResetTime.Format(time.RFC3339),
+        "trader_id":       at.id,
+        "trader_name":     at.name,
+        "ai_model":        at.aiModel,
+        "exchange":        at.exchange,
+        "is_running":      at.isRunning,
+        "start_time":      at.startTime.Format(time.RFC3339),
+        "runtime_minutes": int(time.Since(at.startTime).Minutes()),
+        "call_count":      at.callCount,
+        "initial_balance": at.initialBalance,
+        "scan_interval":   at.config.ScanInterval.String(),
+        "stop_until":      at.stopUntil.Format(time.RFC3339),
+        "last_reset_time": at.lastResetTime.Format(time.RFC3339),
         "ai_provider":     aiProvider,
         "execution_enabled": at.executionEnabled,
     }
+}
+
+// GetOKXFills 获取OKX成交记录（仅当该trader为OKX）
+func (at *AutoTrader) GetOKXFills(limit int) ([]map[string]interface{}, error) {
+    if strings.ToLower(at.exchange) != "okx" {
+        return nil, fmt.Errorf("该trader非OKX，无法获取成交记录")
+    }
+    okx, ok := at.trader.(*OKXTrader)
+    if !ok {
+        return nil, fmt.Errorf("底层trader不是OKXTrader类型")
+    }
+    return okx.GetFills(limit)
 }
 
 // SetExecutionEnabled 设置是否启用自动执行

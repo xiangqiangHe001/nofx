@@ -11,8 +11,8 @@ import (
 
 // TraderManager 绠＄悊澶氫釜trader瀹炰緥
 type TraderManager struct {
-	traders map[string]*trader.AutoTrader // key: trader ID
-	mu      sync.RWMutex
+    traders map[string]*trader.AutoTrader // key: trader ID
+    mu      sync.RWMutex
 }
 
 // NewTraderManager 鍒涘缓trader绠＄悊鍣?
@@ -172,4 +172,66 @@ func (tm *TraderManager) GetComparisonData() (map[string]interface{}, error) {
 	comparison["count"] = len(traders)
 
 	return comparison, nil
+}
+
+// CloseAllPositions 清空所有Trader的所有持仓
+// 返回每个trader的平仓数量与错误信息
+func (tm *TraderManager) CloseAllPositions() map[string]interface{} {
+    tm.mu.RLock()
+    defer tm.mu.RUnlock()
+
+    result := make(map[string]interface{})
+    for id, t := range tm.traders {
+        count, err := t.CloseAllPositions()
+        entry := map[string]interface{}{
+            "closed_count": count,
+        }
+        if err != nil {
+            entry["error"] = err.Error()
+        } else {
+            entry["success"] = true
+        }
+        result[id] = entry
+    }
+    return result
+}
+
+// RunOnceAll 为所有Trader执行一次AI决策周期
+func (tm *TraderManager) RunOnceAll() map[string]interface{} {
+    tm.mu.RLock()
+    defer tm.mu.RUnlock()
+
+    result := make(map[string]interface{})
+    for id, t := range tm.traders {
+        err := t.RunOnce()
+        entry := map[string]interface{}{}
+        if err != nil {
+            entry["error"] = err.Error()
+        } else {
+            entry["success"] = true
+        }
+        result[id] = entry
+    }
+    return result
+}
+
+// RunAiCloseThenOpenAll 让所有Trader执行：AI平仓阶段 -> AI开仓阶段
+func (tm *TraderManager) RunAiCloseThenOpenAll() map[string]interface{} {
+    tm.mu.RLock()
+    defer tm.mu.RUnlock()
+
+    result := make(map[string]interface{})
+    for id, t := range tm.traders {
+        res, err := t.RunAiCloseThenOpen()
+        entry := map[string]interface{}{
+            "result": res,
+        }
+        if err != nil {
+            entry["error"] = err.Error()
+        } else {
+            entry["success"] = true
+        }
+        result[id] = entry
+    }
+    return result
 }
