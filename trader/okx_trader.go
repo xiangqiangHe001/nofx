@@ -8,6 +8,7 @@ import (
     "fmt"
     "io"
     "net/http"
+    "net/url"
     "strings"
     "sync"
     "time"
@@ -38,8 +39,10 @@ func NewOKXTrader(apiKey, secretKey, passphrase string) (*OKXTrader, error) {
         apiKey:     apiKey,
         secretKey:  secretKey,
         passphrase: passphrase,
-        // 使用系统环境代理（HTTP_PROXY/HTTPS_PROXY），便于与 okx.py 的代理配置保持一致
-        client: &http.Client{Timeout: 20 * time.Second, Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}},
+        // 与 okx.py 保持一致，强制使用 127.0.0.1:7897 作为代理端口
+        client: &http.Client{Timeout: 20 * time.Second, Transport: &http.Transport{Proxy: func(_ *http.Request) (*url.URL, error) {
+            return url.Parse("http://127.0.0.1:7897")
+        }}},
         baseURL:    "https://www.okx.com",
         ctValCache: make(map[string]float64),
     }, nil

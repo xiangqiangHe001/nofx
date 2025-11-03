@@ -1,12 +1,13 @@
 package trader
 
 import (
-	"context"
-	"fmt"
-	"log"
-	"strconv"
-	"sync"
-	"time"
+    "context"
+    "fmt"
+    "log"
+    "strings"
+    "strconv"
+    "sync"
+    "time"
 
 	"github.com/adshao/go-binance/v2/futures"
 )
@@ -112,12 +113,19 @@ func (t *FuturesTrader) GetPositions() ([]map[string]interface{}, error) {
 		posMap["leverage"], _ = strconv.ParseFloat(pos.Leverage, 64)
 		posMap["liquidationPrice"], _ = strconv.ParseFloat(pos.LiquidationPrice, 64)
 
-		// 判断方向
-		if posAmt > 0 {
-			posMap["side"] = "long"
-		} else {
-			posMap["side"] = "short"
-		}
+        // 判断方向：优先使用 PositionSide（双向持仓下 PositionAmt 通常为正）
+        if strings.EqualFold(pos.PositionSide, "LONG") {
+            posMap["side"] = "long"
+        } else if strings.EqualFold(pos.PositionSide, "SHORT") {
+            posMap["side"] = "short"
+        } else {
+            // 回退：使用数量符号
+            if posAmt > 0 {
+                posMap["side"] = "long"
+            } else {
+                posMap["side"] = "short"
+            }
+        }
 
 		result = append(result, posMap)
 	}

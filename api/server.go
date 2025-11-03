@@ -62,7 +62,7 @@ func (s *Server) setupRoutes() {
 
 	// API路由组
 	api := s.router.Group("/api")
-	{
+    {
 		// 竞赛总览
 		api.GET("/competition", s.handleCompetition)
 
@@ -79,10 +79,19 @@ func (s *Server) setupRoutes() {
 		api.GET("/equity-history", s.handleEquityHistory)
 		api.GET("/performance", s.handlePerformance)
 
-		// 执行开关与状态
-		api.GET("/execution", s.handleExecutionStatus)
-		api.POST("/execution", s.handleExecutionToggle)
-	}
+        // 执行开关与状态
+        api.GET("/execution", s.handleExecutionStatus)
+        api.POST("/execution", s.handleExecutionToggle)
+
+        // 清空所有仓位（所有Trader）
+        api.POST("/close-all-positions", s.handleCloseAllPositions)
+
+        // 一键完整开平仓流程：先清仓 -> 运行一次AI决策 -> 等待 -> 再清仓
+        api.POST("/run-full-cycle", s.handleRunFullCycle)
+
+        // AI先决策平仓，再决策开仓
+        api.POST("/ai-close-then-open", s.handleAiCloseThenOpen)
+    }
 }
 
 // handleHealth 健康检查
@@ -133,6 +142,72 @@ func (s *Server) handleTraderList(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, result)
+}
+
+// handleCloseAllPositions 清空所有Trader的所有持仓
+func (s *Server) handleCloseAllPositions(c *gin.Context) {
+    result := s.traderManager.CloseAllPositions()
+    c.JSON(http.StatusOK, result)
+}
+
+// handleRunFullCycle 执行完整开平仓流程
+// 请求体可选字段：{"delay_seconds": 3}
+func (s *Server) handleRunFullCycle(c *gin.Context) {
+    var req struct {
+        DelaySeconds int `json:"delay_seconds"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        // 如果没有JSON，使用默认值
+        req.DelaySeconds = 3
+    }
+    if req.DelaySeconds <= 0 {
+        req.DelaySeconds = 3
+    }
+
+    // 1) 先清空所有持仓
+    closedBefore := s.traderManager.CloseAllPositions()
+
+    // 2) 为所有Trader执行一次AI决策周期
+    runOnce := s.traderManager.RunOnceAll()
+
+    // 3) 等待指定秒数
+    time.Sleep(time.Duration(req.DelaySeconds) * time.Second)
+
+    // 4) 再次清仓，完成完整流程演示
+    closedAfter := s.traderManager.CloseAllPositions()
+
+    c.JSON(http.StatusOK, map[string]interface{}{
+        "closed_before": closedBefore,
+        "run_once":      runOnce,
+        "closed_after":  closedAfter,
+        "delay_seconds": req.DelaySeconds,
+    })
+}
+
+// handleAiCloseThenOpen 让AI先决策并执行平仓，再决策并执行开仓
+// 可选：通过query参数 ?trader_id=xxx 仅对指定Trader执行；默认对所有Trader
+func (s *Server) handleAiCloseThenOpen(c *gin.Context) {
+    traderID := c.Query("trader_id")
+
+    if traderID == "" {
+        // 对所有trader执行
+        result := s.traderManager.RunAiCloseThenOpenAll()
+        c.JSON(http.StatusOK, result)
+        return
+    }
+
+    // 指定trader执行
+    t, err := s.traderManager.GetTrader(traderID)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+    res, err := t.RunAiCloseThenOpen()
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error(), "result": res})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"result": res})
 }
 
 // handleStatus 系统状态
@@ -456,9 +531,9 @@ func (s *Server) handleExecutionToggle(c *gin.Context) {
 
 // Start 启动服务器
 func (s *Server) Start() error {
-	addr := fmt.Sprintf(":%d", s.port)
-	log.Printf("🌐 API服务器启动在 http://localhost%s", addr)
-	log.Printf("📊 API文档:")
+    addr := fmt.Sprintf(":%d", s.port)
+    log.Printf("🌐 API服务器启动在 http://localhost%s", addr)
+    log.Printf("📊 API文档:")
 	log.Printf("  • GET  /api/competition      - 竞赛总览（对比所有trader）")
 	log.Printf("  • GET  /api/traders          - Trader列表")
 	log.Printf("  • GET  /api/status?trader_id=xxx     - 指定trader的系统状态")
@@ -467,10 +542,13 @@ func (s *Server) Start() error {
 	log.Printf("  • GET  /api/decisions?trader_id=xxx  - 指定trader的决策日志")
 	log.Printf("  • GET  /api/decisions/latest?trader_id=xxx - 指定trader的最新决策")
 	log.Printf("  • GET  /api/statistics?trader_id=xxx - 指定trader的统计信息")
-	log.Printf("  • GET  /api/equity-history?trader_id=xxx - 指定trader的收益率历史数据")
-	log.Printf("  • GET  /api/performance?trader_id=xxx - 指定trader的AI学习表现分析")
-	log.Printf("  • GET  /health               - 健康检查")
-	log.Println()
+    log.Printf("  • GET  /api/equity-history?trader_id=xxx - 指定trader的收益率历史数据")
+    log.Printf("  • GET  /api/performance?trader_id=xxx - 指定trader的AI学习表现分析")
+    log.Printf("  • POST /api/close-all-positions      - 平掉所有Trader的全部持仓")
+    log.Printf("  • POST /api/run-full-cycle           - 一键完整开平仓流程（先清仓→AI决策→再清仓）")
+    log.Printf("  • POST /api/ai-close-then-open       - AI先决策平仓，再决策开仓（可选trader_id）")
+    log.Printf("  • GET  /health               - 健康检查")
+    log.Println()
 
-	return s.router.Run(addr)
+    return s.router.Run(addr)
 }

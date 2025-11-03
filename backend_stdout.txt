@@ -1,0 +1,39 @@
+╔════════════════════════════════════════════════════════════╗
+║    🏆 AI模型交易竞赛系统 - Qwen vs DeepSeek               ║
+╚════════════════════════════════════════════════════════════╝
+
+⚠️  警告: BTC/ETH杠杆设置为10x，如果使用子账户可能会失败（子账户限制≤5x）
+⚠️  警告: 山寨币杠杆设置为10x，如果使用子账户可能会失败（子账户限制≤5x）
+
+
+🏁 竞赛参赛者:
+  • OKX DeepSeek Trader (DEEPSEEK) - 初始资金: 10 USDT
+  • OKX Qwen Trader (QWEN) - 初始资金: 10 USDT
+
+🤖 AI全权决策模式:
+  • AI将自主决定每笔交易的杠杆倍数（山寨币最高10倍，BTC/ETH最高10倍）
+  • AI将自主决定每笔交易的仓位大小
+  • AI将自主设置止损和止盈价格
+  • AI将基于市场数据、技术指标、账户状态做出全面分析
+
+⚠️  风险提示: AI自动交易有风险，建议小额资金测试！
+
+按 Ctrl+C 停止运行
+============================================================
+
+[GIN] 2025/11/03 - 00:40:34 | 200 |            0s |             ::1 | GET      "/health"
+[GIN] 2025/11/03 - 00:40:34 | 200 |            0s |             ::1 | GET      "/api/traders"
+[GIN] 2025/11/03 - 00:40:34 | 200 |    537.4612ms |             ::1 | GET      "/api/account?trader_id=okx_deepseek"
+[GIN] 2025/11/03 - 00:40:35 | 200 |         500µs |             ::1 | GET      "/api/positions?trader_id=okx_deepseek"
+📝 决策记录已保存: decision_20251103_004041_cycle1.json
+📝 决策记录已保存: decision_20251103_004110_cycle1.json
+📝 决策记录已保存: decision_20251103_004323_cycle2.json
+📝 决策记录已保存: decision_20251103_004324_cycle2.json
+[GIN] 2025/11/03 - 00:43:35 | 200 |            0s |             ::1 | POST     "/api/execution?trader_id=okx_deepseek"
+[GIN] 2025/11/03 - 00:43:35 | 200 |            0s |             ::1 | GET      "/api/execution?trader_id=okx_deepseek"
+[GIN] 2025/11/03 - 00:43:35 | 200 |      1.5682ms |             ::1 | GET      "/api/decisions/latest?trader_id=okx_deepseek"
+[GIN] 2025/11/03 - 00:43:36 | 200 |    518.7202ms |             ::1 | GET      "/api/positions?trader_id=okx_deepseek"
+[GIN] 2025/11/03 - 00:44:35 | 200 |      1.0075ms |             ::1 | POST     "/api/execution?trader_id=okx_deepseek"
+[GIN] 2025/11/03 - 00:44:35 | 200 |            0s |             ::1 | GET      "/api/execution?trader_id=okx_deepseek"
+📝 决策记录已保存: decision_20251103_004626_cycle3.json
+📝 决策记录已保存: decision_20251103_004642_cycle3.json

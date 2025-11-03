@@ -1,13 +1,14 @@
 package trader
 
 import (
-	"encoding/json"
-	"fmt"
-	"log"
-	"nofx/decision"
-	"nofx/logger"
-	"nofx/market"
-	"nofx/mcp"
+    "encoding/json"
+    "fmt"
+    "strconv"
+    "log"
+    "nofx/decision"
+    "nofx/logger"
+    "nofx/market"
+    "nofx/mcp"
 	"nofx/pool"
 	"strings"
 	"time"
@@ -776,12 +777,12 @@ func (at *AutoTrader) GetName() string {
 
 // GetAIModel 获取AI模型
 func (at *AutoTrader) GetAIModel() string {
-	return at.aiModel
+    return at.aiModel
 }
 
 // GetDecisionLogger 获取决策日志记录器
 func (at *AutoTrader) GetDecisionLogger() *logger.DecisionLogger {
-	return at.decisionLogger
+    return at.decisionLogger
 }
 
 // GetStatus 获取系统状态（用于API）
@@ -817,6 +818,185 @@ func (at *AutoTrader) SetExecutionEnabled(enabled bool) {
 // IsExecutionEnabled 获取自动执行开关状态
 func (at *AutoTrader) IsExecutionEnabled() bool {
     return at.executionEnabled
+}
+
+// RunOnce 触发一次AI决策周期（单次）
+func (at *AutoTrader) RunOnce() error {
+    return at.runCycle()
+}
+
+// CloseAllPositions 平掉该Trader的所有持仓
+// 返回成功平仓的持仓数量
+func (at *AutoTrader) CloseAllPositions() (int, error) {
+    positions, err := at.trader.GetPositions()
+    if err != nil {
+        return 0, fmt.Errorf("failed to get positions: %w", err)
+    }
+
+    closed := 0
+    for _, pos := range positions {
+        symbolVal, ok := pos["symbol"]
+        if !ok {
+            continue
+        }
+        symbol, _ := symbolVal.(string)
+
+        sideVal, ok := pos["side"]
+        if !ok {
+            continue
+        }
+        side, _ := sideVal.(string)
+
+        // 尝试读取数量（用于日志）；实际平仓使用 quantity=0 表示全部
+        var qty float64
+        if qv, ok := pos["positionAmt"]; ok {
+            switch v := qv.(type) {
+            case float64:
+                qty = v
+            case int:
+                qty = float64(v)
+            case string:
+                if parsed, perr := strconv.ParseFloat(v, 64); perr == nil {
+                    qty = parsed
+                }
+            }
+        }
+
+        switch side {
+        case "long":
+            if _, err := at.trader.CloseLong(symbol, 0); err != nil {
+                log.Printf("Failed to close long %s (qty=%.8f): %v", symbol, qty, err)
+                continue
+            }
+            closed++
+        case "short":
+            if _, err := at.trader.CloseShort(symbol, 0); err != nil {
+                log.Printf("Failed to close short %s (qty=%.8f): %v", symbol, qty, err)
+                continue
+            }
+            closed++
+        default:
+            // unknown side, skip
+            continue
+        }
+
+        // 最后尝试取消该symbol所有挂单（容错即可）
+        if err := at.trader.CancelAllOrders(symbol); err != nil {
+            log.Printf("Failed to cancel orders for %s: %v", symbol, err)
+        }
+    }
+
+    return closed, nil
+}
+
+// RunAiCloseThenOpen 先让AI决策并执行平仓，再让AI决策并执行开仓
+// 该方法将分别记录两次决策日志，确保流程清晰：第一次仅执行 close_*，第二次仅执行 open_*
+func (at *AutoTrader) RunAiCloseThenOpen() (map[string]interface{}, error) {
+    results := map[string]interface{}{
+        "close_phase": map[string]interface{}{},
+        "open_phase":  map[string]interface{}{},
+    }
+
+    // 1) 构建上下文并获取AI决策（平仓阶段）
+    ctx, err := at.buildTradingContext()
+    if err != nil {
+        return nil, fmt.Errorf("failed to build trading context: %w", err)
+    }
+
+    fullDecision, err := decision.GetFullDecision(ctx)
+    if err != nil {
+        return nil, fmt.Errorf("failed to get AI decisions for close phase: %w", err)
+    }
+
+    // 过滤仅 close_* 的决策
+    var closeDecisions []decision.Decision
+    for _, d := range fullDecision.Decisions {
+        if d.Action == "close_long" || d.Action == "close_short" {
+            closeDecisions = append(closeDecisions, d)
+        }
+    }
+
+    closeRecord := &logger.DecisionRecord{ExecutionLog: []string{}, Success: true}
+    for _, d := range closeDecisions {
+        actionRecord := logger.DecisionAction{
+            Action:    d.Action,
+            Symbol:    d.Symbol,
+            Quantity:  0,
+            Leverage:  d.Leverage,
+            Price:     0,
+            Timestamp: time.Now(),
+            Success:   false,
+        }
+        if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
+            actionRecord.Error = err.Error()
+            closeRecord.ExecutionLog = append(closeRecord.ExecutionLog, fmt.Sprintf("%s %s failed: %v", d.Symbol, d.Action, err))
+            closeRecord.Success = false
+        } else {
+            actionRecord.Success = true
+            closeRecord.ExecutionLog = append(closeRecord.ExecutionLog, fmt.Sprintf("%s %s succeeded", d.Symbol, d.Action))
+        }
+        closeRecord.Decisions = append(closeRecord.Decisions, actionRecord)
+    }
+    if err := at.decisionLogger.LogDecision(closeRecord); err != nil {
+        log.Printf("Failed to save close phase decision record: %v", err)
+    }
+
+    results["close_phase"] = map[string]interface{}{
+        "count":    len(closeDecisions),
+        "executed": closeRecord.Decisions,
+        "success":  closeRecord.Success,
+    }
+
+    // 2) 再次构建上下文并获取AI决策（开仓阶段）
+    ctx2, err := at.buildTradingContext()
+    if err != nil {
+        return nil, fmt.Errorf("failed to build trading context for open phase: %w", err)
+    }
+    fullDecision2, err := decision.GetFullDecision(ctx2)
+    if err != nil {
+        return nil, fmt.Errorf("failed to get AI decisions for open phase: %w", err)
+    }
+
+    // 过滤仅 open_* 的决策
+    var openDecisions []decision.Decision
+    for _, d := range fullDecision2.Decisions {
+        if d.Action == "open_long" || d.Action == "open_short" {
+            openDecisions = append(openDecisions, d)
+        }
+    }
+
+    openRecord := &logger.DecisionRecord{ExecutionLog: []string{}, Success: true}
+    for _, d := range openDecisions {
+        actionRecord := logger.DecisionAction{
+            Action:    d.Action,
+            Symbol:    d.Symbol,
+            Quantity:  0,
+            Leverage:  d.Leverage,
+            Price:     0,
+            Timestamp: time.Now(),
+            Success:   false,
+        }
+        if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
+            actionRecord.Error = err.Error()
+            openRecord.ExecutionLog = append(openRecord.ExecutionLog, fmt.Sprintf("%s %s failed: %v", d.Symbol, d.Action, err))
+            openRecord.Success = false
+        } else {
+            actionRecord.Success = true
+            openRecord.ExecutionLog = append(openRecord.ExecutionLog, fmt.Sprintf("%s %s succeeded", d.Symbol, d.Action))
+        }
+        openRecord.Decisions = append(openRecord.Decisions, actionRecord)
+    }
+    if err := at.decisionLogger.LogDecision(openRecord); err != nil {
+        log.Printf("Failed to save open phase decision record: %v", err)
+    }
+
+    results["open_phase"] = map[string]interface{}{
+        "count":    len(openDecisions),
+        "executed": openRecord.Decisions,
+        "success":  openRecord.Success,
+    }
+
+    return results, nil
 }
 
 // GetAccountInfo 获取账户信息（用于API）

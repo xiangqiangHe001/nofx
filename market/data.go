@@ -6,8 +6,10 @@ import (
     "io/ioutil"
     "math"
     "net/http"
+    "net/url"
     "strconv"
     "strings"
+    "time"
 )
 
 // Data 市场数据结构
@@ -62,6 +64,11 @@ type Kline struct {
 	Volume    float64
 	CloseTime int64
 }
+
+// 自定义HTTP客户端：强制使用本地代理 127.0.0.1:7897，以与 okx.py 保持一致
+var httpClient = &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{Proxy: func(_ *http.Request) (*url.URL, error) {
+    return url.Parse("http://127.0.0.1:7897")
+}}}
 
 // Get 获取指定代币的市场数据
 func Get(symbol string) (*Data, error) {
@@ -150,7 +157,7 @@ func getKlines(symbol, interval string, limit int) ([]Kline, error) {
 
 // fetchBinanceKlines 获取 Binance K线
 func fetchBinanceKlines(url string) ([]Kline, error) {
-    resp, err := http.Get(url)
+    resp, err := httpClient.Get(url)
     if err != nil {
         return nil, err
     }
@@ -200,7 +207,7 @@ func fetchOKXKlines(symbol, interval string, limit int) ([]Kline, error) {
     }
     url := fmt.Sprintf("https://www.okx.com/api/v5/market/candles?instId=%s&bar=%s&limit=%d", instID, bar, limit)
 
-    resp, err := http.Get(url)
+    resp, err := httpClient.Get(url)
     if err != nil {
         return nil, err
     }
@@ -466,12 +473,12 @@ func calculateLongerTermData(klines []Kline) *LongerTermData {
 
 // getOpenInterestData 获取OI数据
 func getOpenInterestData(symbol string) (*OIData, error) {
-	url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/openInterest?symbol=%s", symbol)
+    url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/openInterest?symbol=%s", symbol)
 
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
+    resp, err := httpClient.Get(url)
+    if err != nil {
+        return nil, err
+    }
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
@@ -499,12 +506,12 @@ func getOpenInterestData(symbol string) (*OIData, error) {
 
 // getFundingRate 获取资金费率
 func getFundingRate(symbol string) (float64, error) {
-	url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=%s", symbol)
+    url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=%s", symbol)
 
-	resp, err := http.Get(url)
-	if err != nil {
-		return 0, err
-	}
+    resp, err := httpClient.Get(url)
+    if err != nil {
+        return 0, err
+    }
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
