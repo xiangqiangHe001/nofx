@@ -7,6 +7,7 @@ import (
     "encoding/json"
     "fmt"
     "io"
+    "log"
     "math"
     "net/http"
     "net/url"
@@ -276,6 +277,13 @@ func (o *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map
         detail := ""
         if len(resp.Data) > 0 && (resp.Data[0].SCode != "" || resp.Data[0].SMsg != "") {
             detail = fmt.Sprintf(" detail: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+            
+            // 特殊处理账户模式错误 (51010) - 清除持仓模式缓存并重试
+            if resp.Data[0].SCode == "51010" && strings.Contains(resp.Data[0].SMsg, "account mode") {
+                o.posModeCache = "" // 清除缓存，强制重新检测持仓模式
+                o.posModeCacheTime = time.Time{}
+                log.Printf("⚠️ 检测到账户模式错误51010，已清除持仓模式缓存，请重新尝试下单")
+            }
         }
         return nil, fmt.Errorf("OKX下单失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
     }
@@ -342,6 +350,13 @@ func (o *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
         detail := ""
         if len(resp.Data) > 0 && (resp.Data[0].SCode != "" || resp.Data[0].SMsg != "") {
             detail = fmt.Sprintf(" detail: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+            
+            // 特殊处理账户模式错误 (51010) - 清除持仓模式缓存并重试
+            if resp.Data[0].SCode == "51010" && strings.Contains(resp.Data[0].SMsg, "account mode") {
+                o.posModeCache = "" // 清除缓存，强制重新检测持仓模式
+                o.posModeCacheTime = time.Time{}
+                log.Printf("⚠️ 检测到账户模式错误51010，已清除持仓模式缓存，请重新尝试下单")
+            }
         }
         return nil, fmt.Errorf("OKX下单失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
     }
@@ -401,6 +416,13 @@ func (o *OKXTrader) CloseLong(symbol string, quantity float64) (map[string]inter
         detail := ""
         if len(resp.Data) > 0 && (resp.Data[0].SCode != "" || resp.Data[0].SMsg != "") {
             detail = fmt.Sprintf(" detail: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+            
+            // 特殊处理账户模式错误 (51010) - 清除持仓模式缓存并重试
+            if resp.Data[0].SCode == "51010" && strings.Contains(resp.Data[0].SMsg, "account mode") {
+                o.posModeCache = "" // 清除缓存，强制重新检测持仓模式
+                o.posModeCacheTime = time.Time{}
+                log.Printf("⚠️ 检测到账户模式错误51010，已清除持仓模式缓存，请重新尝试下单")
+            }
         }
         return nil, fmt.Errorf("OKX平仓失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
     }
@@ -460,6 +482,13 @@ func (o *OKXTrader) CloseShort(symbol string, quantity float64) (map[string]inte
         detail := ""
         if len(resp.Data) > 0 && (resp.Data[0].SCode != "" || resp.Data[0].SMsg != "") {
             detail = fmt.Sprintf(" detail: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+            
+            // 特殊处理账户模式错误 (51010) - 清除持仓模式缓存并重试
+            if resp.Data[0].SCode == "51010" && strings.Contains(resp.Data[0].SMsg, "account mode") {
+                o.posModeCache = "" // 清除缓存，强制重新检测持仓模式
+                o.posModeCacheTime = time.Time{}
+                log.Printf("⚠️ 检测到账户模式错误51010，已清除持仓模式缓存，请重新尝试下单")
+            }
         }
         return nil, fmt.Errorf("OKX平仓失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
     }
@@ -601,6 +630,12 @@ func (o *OKXTrader) GetFills(limit int) ([]map[string]interface{}, error) {
         return nil, fmt.Errorf("解析成交记录失败: %w", err)
     }
     if payload.Code != "0" {
+        // 特殊处理账户模式错误 (51010) - 清除持仓模式缓存
+        if payload.Code == "51010" && strings.Contains(payload.Msg, "account mode") {
+            o.posModeCache = ""
+            o.posModeCacheTime = time.Time{}
+            log.Printf("⚠️ 检测到账户模式错误51010，已清除持仓模式缓存，请重新尝试获取成交记录")
+        }
         return nil, fmt.Errorf("OKX fills API error: code=%s msg=%s", payload.Code, payload.Msg)
     }
 

@@ -64,7 +64,7 @@ export default function AILearning({ traderId }: AILearningProps) {
   // 当 AI 学习统计为 0 时，尝试获取 OKX 成交记录以辅助展示
   const { data: fills } = useSWR<any[]>(
     performance && performance.total_trades === 0 && traderId ? `okx-fills-${traderId}` : null,
-    () => api.getOkxFills(traderId, 50),
+    () => api.getOkxFills(traderId, 5000),
     {
       refreshInterval: 30000,
       revalidateOnFocus: false,

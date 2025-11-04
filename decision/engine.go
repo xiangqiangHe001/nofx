@@ -91,26 +91,26 @@ type FullDecision struct {
 
 // GetFullDecision 获取AI的完整交易决策（批量分析所有币种和持仓）
 func GetFullDecision(ctx *Context) (*FullDecision, error) {
-    // 1. 为所有币种获取市场数据
-    if err := fetchMarketDataForContext(ctx); err != nil {
-        return nil, fmt.Errorf("failed to fetch market data: %w", err)
-    }
+	// 1. 为所有币种获取市场数据
+	if err := fetchMarketDataForContext(ctx); err != nil {
+		return nil, fmt.Errorf("failed to fetch market data: %w", err)
+	}
 
 	// 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
 	systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
 	userPrompt := buildUserPrompt(ctx)
 
 	// 3. 调用AI API（使用 system + user prompt）
-    aiResponse, err := mcp.CallWithMessages(systemPrompt, userPrompt)
-    if err != nil {
-        return nil, fmt.Errorf("failed to call AI API: %w", err)
-    }
+	aiResponse, err := mcp.CallWithMessages(systemPrompt, userPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call AI API: %w", err)
+	}
 
 	// 4. 解析AI响应
-    decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
-    if err != nil {
-        return nil, fmt.Errorf("failed to parse AI response: %w", err)
-    }
+	decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse AI response: %w", err)
+	}
 
 	decision.Timestamp = time.Now()
 	decision.UserPrompt = userPrompt // 保存输入prompt
@@ -161,12 +161,12 @@ func fetchMarketDataForContext(ctx *Context) error {
 			// 计算持仓价值（USD）= 持仓量 × 当前价格
 			oiValue := data.OpenInterest.Latest * data.CurrentPrice
 			oiValueInMillions := oiValue / 1_000_000 // 转换为百万美元单位
-            if oiValueInMillions < 15 {
-                log.Printf("%s OI value too low (%.2fM USD < 15M), skipping [OI:%.0f × Price:%.4f]",
-                    symbol, oiValueInMillions, data.OpenInterest.Latest, data.CurrentPrice)
-                continue
-            }
-        }
+			if oiValueInMillions < 15 {
+				log.Printf("%s OI value too low (%.2fM USD < 15M), skipping [OI:%.0f × Price:%.4f]",
+					symbol, oiValueInMillions, data.OpenInterest.Latest, data.CurrentPrice)
+				continue
+			}
+		}
 
 		ctx.MarketDataMap[symbol] = data
 	}
@@ -204,7 +204,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	var sb strings.Builder
 
 	// === 核心使命 ===
-	sb.WriteString("你是专业的加密货币交易AI，在币安合约市场进行自主交易。\n\n")
+	sb.WriteString("你是专业的加密货币交易AI，在OKX合约市场进行自主交易。\n\n")
 	sb.WriteString("# 🎯 核心目标\n\n")
 	sb.WriteString("**最大化夏普比率（Sharpe Ratio）**\n\n")
 	sb.WriteString("夏普比率 = 平均收益 / 收益波动率\n\n")
@@ -215,7 +215,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("- ❌ 频繁交易、小盈小亏 → 增加波动，严重降低夏普\n")
 	sb.WriteString("- ❌ 过度交易、手续费损耗 → 直接亏损\n")
 	sb.WriteString("- ❌ 过早平仓、频繁进出 → 错失大行情\n\n")
-	sb.WriteString("**关键认知**: 系统每3分钟扫描一次，但不意味着每次都要交易！\n")
+	sb.WriteString("**关键认知**: 系统每3或5分钟扫描一次，但不意味着每次都要交易！\n")
 	sb.WriteString("大多数时候应该是 `wait` 或 `hold`，只在极佳机会时才开仓。\n\n")
 
 	// === 硬约束（风险控制）===
@@ -267,7 +267,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("# 🧬 夏普比率自我进化\n\n")
 	sb.WriteString("每次你会收到**夏普比率**作为绩效反馈（周期级别）：\n\n")
 	sb.WriteString("**夏普比率 < -0.5** (持续亏损):\n")
-	sb.WriteString("  → 🛑 停止交易，连续观望至少6个周期（18分钟）\n")
+	sb.WriteString("  → 🛑 停止交易，连续观望至少6个周期（30分钟）\n")
 	sb.WriteString("  → 🔍 深度反思：\n")
 	sb.WriteString("     • 交易频率过高？（每小时>2次就是过度）\n")
 	sb.WriteString("     • 持仓时间过短？（<30分钟就是过早平仓）\n")
@@ -304,13 +304,20 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("- `confidence`: 0-100（开仓建议≥75）\n")
 	sb.WriteString("- 开仓时必填: leverage, position_size_usd, stop_loss, take_profit, confidence, risk_usd, reasoning\n\n")
 
+	// === 严格的JSON约束（防止解析错误）===
+	sb.WriteString("**严格要求**:\n")
+	sb.WriteString("- 必须输出**严格合法的JSON数组**，不要包含注释、尾随逗号、NaN、Infinity、或任何非JSON内容\n")
+	sb.WriteString("- `risk_usd` 必须是**数字字面量**（例如 `300`），**禁止**使用公式或表达式（如 `35 * 10`、`(a+b)/c` 等）\n")
+	sb.WriteString("- 不要在JSON里写分析文字或单位（如 `300 USD`），只允许纯字段值\n")
+	sb.WriteString("- 若暂无法给出有效开仓建议，请输出空数组 `[]`，不要构造无效JSON\n\n")
+
 	// === 关键提醒 ===
 	sb.WriteString("---\n\n")
 	sb.WriteString("**记住**: \n")
 	sb.WriteString("- 目标是夏普比率，不是交易频率\n")
 	sb.WriteString("- 做空 = 做多，都是赚钱工具\n")
 	sb.WriteString("- 宁可错过，不做低质量交易\n")
-	sb.WriteString("- 风险回报比1:3是底线\n")
+	sb.WriteString("- 风险回报比1:2.6是底线\n")
 
 	return sb.String()
 }
@@ -444,6 +451,12 @@ func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthL
 	}, nil
 }
 
+// ParseDecisionsForTest 对外暴露的解析函数，仅用于本地解析测试小工具
+// 目的：允许在不调用外部API的情况下，直接验证AI响应字符串的解析与校验逻辑
+func ParseDecisionsForTest(aiResponse string, accountEquity float64, btcEthLeverage, altcoinLeverage int) (*FullDecision, error) {
+	return parseFullDecisionResponse(aiResponse, accountEquity, btcEthLeverage, altcoinLeverage)
+}
+
 // extractCoTTrace 提取思维链分析
 func extractCoTTrace(response string) string {
 	// 查找JSON数组的开始位置
@@ -480,6 +493,9 @@ func extractDecisions(response string) ([]Decision, error) {
 	// 使用简单的字符串扫描而不是正则表达式
 	jsonContent = fixMissingQuotes(jsonContent)
 
+	// 🔧 清理非法 risk_usd 表达式：若出现加减乘除或括号，替换为数字0
+	jsonContent = fixRiskUsdExpressions(jsonContent)
+
 	// 解析JSON
 	var decisions []Decision
 	if err := json.Unmarshal([]byte(jsonContent), &decisions); err != nil {
@@ -496,6 +512,76 @@ func fixMissingQuotes(jsonStr string) string {
 	jsonStr = strings.ReplaceAll(jsonStr, "\u2018", "'")  // '
 	jsonStr = strings.ReplaceAll(jsonStr, "\u2019", "'")  // '
 	return jsonStr
+}
+
+// fixRiskUsdExpressions 检测并清理 risk_usd 的非法表达式，替换为合法数字（0）
+// 说明：AI有时会输出诸如 35 * 10 或 (108000-107328)/107328 之类的表达式，这不是合法JSON数值。
+// 为了保证解析稳定性，这里将任何包含运算符的 risk_usd 值统一替换为 0。
+func fixRiskUsdExpressions(jsonStr string) string {
+	// 逐次定位 "risk_usd" 键并检查其值是否包含表达式字符
+	const key = "\"risk_usd\""
+	i := 0
+	for {
+		idx := strings.Index(jsonStr[i:], key)
+		if idx == -1 {
+			break
+		}
+		// 绝对位置
+		pos := i + idx
+		// 从 key 之后查找冒号
+		colon := strings.Index(jsonStr[pos+len(key):], ":")
+		if colon == -1 {
+			i = pos + len(key)
+			continue
+		}
+		// 值起始位置（跳过 ":" 和可能的空白）
+		valStart := pos + len(key) + colon + 1
+		// 跳过空白
+		for valStart < len(jsonStr) && (jsonStr[valStart] == ' ' || jsonStr[valStart] == '\n' || jsonStr[valStart] == '\t') {
+			valStart++
+		}
+		// 值结束位置：直到下一个逗号或右花括号
+		valEnd := valStart
+		for valEnd < len(jsonStr) && jsonStr[valEnd] != ',' && jsonStr[valEnd] != '}' {
+			valEnd++
+		}
+		// 提取值并检查是否包含表达式字符
+		value := strings.TrimSpace(jsonStr[valStart:valEnd])
+		if containsExpressionChars(value) {
+			// 用 0 替换表达式值
+			jsonStr = jsonStr[:valStart] + "0" + jsonStr[valEnd:]
+			// 移动游标到替换后的末尾，避免死循环
+			i = valStart + 1
+			continue
+		}
+		// 正常情况，继续向后搜索
+		i = valEnd
+	}
+	return jsonStr
+}
+
+// containsExpressionChars 判断字符串是否包含常见的算术表达式字符
+func containsExpressionChars(s string) bool {
+	if s == "" {
+		return false
+	}
+	// 如果是以引号开头，说明是字符串（非法类型，但交给json解析报错），不在此处理
+	if s[0] == '"' {
+		return false
+	}
+	// 只要包含以下任一字符，即认为不是纯数字字面量
+	exprChars := "*/+-()"
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if strings.ContainsRune(exprChars, rune(c)) {
+			return true
+		}
+		// 非数字、非小数点、非科学计数法的 e/E 也视作可疑表达式（排除合法数字之外的情况）
+		if !(c >= '0' && c <= '9') && c != '.' && c != 'e' && c != 'E' {
+			return true
+		}
+	}
+	return false
 }
 
 // validateDecisions 验证所有决策（需要账户信息和杠杆配置）
@@ -562,13 +648,13 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		if d.PositionSizeUSD <= 0 {
 			return fmt.Errorf("仓位大小必须大于0: %.2f", d.PositionSizeUSD)
 		}
-        // 验证仓位价值上限（加2%容差以避免浮点数精度问题）
-        tolerance := maxPositionValue * 0.02 // 2%容差
-        if d.PositionSizeUSD > maxPositionValue+tolerance {
-            // 超限时采用“软上限”：自动缩减到允许的最大值，而不是报错
-            // 这样可以避免前端出现“决策验证失败”的报错，提高鲁棒性
-            d.PositionSizeUSD = maxPositionValue
-        }
+		// 验证仓位价值上限（加2%容差以避免浮点数精度问题）
+		tolerance := maxPositionValue * 0.02 // 2%容差
+		if d.PositionSizeUSD > maxPositionValue+tolerance {
+			// 超限时采用“软上限”：自动缩减到允许的最大值，而不是报错
+			// 这样可以避免前端出现“决策验证失败”的报错，提高鲁棒性
+			d.PositionSizeUSD = maxPositionValue
+		}
 		if d.StopLoss <= 0 || d.TakeProfit <= 0 {
 			return fmt.Errorf("止损和止盈必须大于0")
 		}
