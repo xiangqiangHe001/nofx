@@ -169,4 +169,18 @@ export const api = {
     if (!res.ok) throw new Error('获取 OKX 原始委托数据失败');
     return res.json();
   },
+
+  // 获取 OKX 成交记录（fills），支持 trader_id 和 limit
+  async getOkxFills(traderId?: string, limit?: number): Promise<any[]> {
+    const params = new URLSearchParams();
+    if (traderId) params.set('trader_id', traderId);
+    if (limit && limit > 0) params.set('limit', String(limit));
+    const query = params.toString();
+    const url = query
+      ? `${API_BASE}/okx/fills?${query}`
+      : `${API_BASE}/okx/fills`;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('获取 OKX 成交记录失败');
+    return res.json();
+  },
 };

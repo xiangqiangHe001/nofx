@@ -7,6 +7,7 @@ import (
     "encoding/json"
     "fmt"
     "io"
+    "math"
     "net/http"
     "net/url"
     "strings"
@@ -28,9 +29,15 @@ type OKXTrader struct {
     cachedPositions   []map[string]interface{}
     positionsCacheTime time.Time
 
-    // 合约面值缓存
+    // 合约规格缓存
     ctValCache map[string]float64
+    lotSzCache map[string]float64
+    minSzCache map[string]float64
     cacheMu    sync.RWMutex
+
+    // 持仓模式缓存（long_short_mode 或 net_mode）
+    posModeCache      string
+    posModeCacheTime  time.Time
 }
 
 // NewOKXTrader 创建OKX交易器
@@ -45,6 +52,8 @@ func NewOKXTrader(apiKey, secretKey, passphrase string) (*OKXTrader, error) {
         }}},
         baseURL:    "https://www.okx.com",
         ctValCache: make(map[string]float64),
+        lotSzCache: make(map[string]float64),
+        minSzCache: make(map[string]float64),
     }, nil
 }
 
@@ -207,36 +216,71 @@ func (o *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map
         return nil, fmt.Errorf("OKX未配置API密钥")
     }
     instID := toOKXInstID(symbol)
-    // 设置杠杆（容错，不阻塞下单）
-    _ = o.SetLeverage(symbol, leverage)
+    // 设置杠杆（失败则直接返回，避免风控拒绝导致通用错误）
+    if err := o.SetLeverage(symbol, leverage); err != nil {
+        return nil, fmt.Errorf("设置杠杆失败: %w", err)
+    }
 
-    // 计算合约张数
-    ctVal := o.getCTVal(instID)
+    // 获取合约规格（面值、最小张数、步进张数）并校验
+    ctVal, lotSz, minSz, exists := o.getInstrumentSpec(instID)
+    if !exists {
+        return nil, fmt.Errorf("合约不存在或不支持: %s", instID)
+    }
     if ctVal <= 0 {
         ctVal = 1.0
     }
+    // 计算合约张数，并按 lotSz 向下取整到合法步进
     contracts := quantity / ctVal
     if contracts <= 0 {
         return nil, fmt.Errorf("下单数量过小")
     }
-    // OKX张数按整数或最小增量处理（保守：四舍五入到3位小数）
-    sz := fmt.Sprintf("%.3f", contracts)
+    if lotSz > 0 {
+        steps := math.Floor(contracts/lotSz)
+        contracts = steps * lotSz
+    }
+    if contracts < minSz || contracts <= 0 {
+        return nil, fmt.Errorf("下单数量过小，最小张数为 %.6f", minSz)
+    }
+    sz := fmt.Sprintf("%.6f", contracts)
 
-    payload := fmt.Sprintf(`{"instId":"%s","tdMode":"cross","side":"buy","ordType":"market","sz":"%s"}`, instID, sz)
-    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order", payload)
+    // 检查持仓模式（双向/净持仓），决定是否传 posSide
+    posMode := o.getPositionMode()
+    req := map[string]interface{}{
+        "instId": instID,
+        "tdMode": "isolated",
+        "side":   "buy",
+        "ordType": "market",
+        "sz":     sz,
+    }
+    if strings.EqualFold(posMode, "long_short_mode") {
+        req["posSide"] = "long"
+    }
+    payloadBytes, _ := json.Marshal(req)
+    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order", string(payloadBytes))
     if err != nil {
         return nil, err
     }
     var resp struct {
         Code string `json:"code"`
         Msg  string `json:"msg"`
-        Data []struct { OrdID string `json:"ordId"` } `json:"data"`
+        Data []struct {
+            OrdID string `json:"ordId"`
+            SCode string `json:"sCode"`
+            SMsg  string `json:"sMsg"`
+        } `json:"data"`
     }
     if err := json.Unmarshal(respBody, &resp); err != nil {
         return nil, fmt.Errorf("解析下单响应失败: %w", err)
     }
     if resp.Code != "0" {
-        return nil, fmt.Errorf("OKX下单失败: code=%s msg=%s", resp.Code, resp.Msg)
+        detail := ""
+        if len(resp.Data) > 0 && (resp.Data[0].SCode != "" || resp.Data[0].SMsg != "") {
+            detail = fmt.Sprintf(" detail: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+        }
+        return nil, fmt.Errorf("OKX下单失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
+    }
+    if len(resp.Data) > 0 && resp.Data[0].SCode != "" && resp.Data[0].SCode != "0" {
+        return nil, fmt.Errorf("OKX下单失败: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
     }
     result := map[string]interface{}{"orderId": resp.Data[0].OrdID}
     return result, nil
@@ -248,20 +292,62 @@ func (o *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
         return nil, fmt.Errorf("OKX未配置API密钥")
     }
     instID := toOKXInstID(symbol)
-    _ = o.SetLeverage(symbol, leverage)
+    if err := o.SetLeverage(symbol, leverage); err != nil {
+        return nil, fmt.Errorf("设置杠杆失败: %w", err)
+    }
 
-    ctVal := o.getCTVal(instID)
+    // 获取合约规格并校验
+    ctVal, lotSz, minSz, exists := o.getInstrumentSpec(instID)
+    if !exists {
+        return nil, fmt.Errorf("合约不存在或不支持: %s", instID)
+    }
     if ctVal <= 0 { ctVal = 1.0 }
     contracts := quantity / ctVal
     if contracts <= 0 { return nil, fmt.Errorf("下单数量过小") }
-    sz := fmt.Sprintf("%.3f", contracts)
+    if lotSz > 0 {
+        steps := math.Floor(contracts/lotSz)
+        contracts = steps * lotSz
+    }
+    if contracts < minSz || contracts <= 0 {
+        return nil, fmt.Errorf("下单数量过小，最小张数为 %.6f", minSz)
+    }
+    sz := fmt.Sprintf("%.6f", contracts)
 
-    payload := fmt.Sprintf(`{"instId":"%s","tdMode":"cross","side":"sell","ordType":"market","sz":"%s"}`, instID, sz)
-    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order", payload)
+    // 检查持仓模式（双向/净持仓），决定是否传 posSide
+    posMode := o.getPositionMode()
+    req := map[string]interface{}{
+        "instId": instID,
+        "tdMode": "isolated",
+        "side":   "sell",
+        "ordType": "market",
+        "sz":     sz,
+    }
+    if strings.EqualFold(posMode, "long_short_mode") {
+        req["posSide"] = "short"
+    }
+    payloadBytes, _ := json.Marshal(req)
+    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order", string(payloadBytes))
     if err != nil { return nil, err }
-    var resp struct { Code string `json:"code"`; Msg string `json:"msg"`; Data []struct{ OrdID string `json:"ordId"` } `json:"data"` }
+    var resp struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            OrdID string `json:"ordId"`
+            SCode string `json:"sCode"`
+            SMsg  string `json:"sMsg"`
+        } `json:"data"`
+    }
     if err := json.Unmarshal(respBody, &resp); err != nil { return nil, fmt.Errorf("解析下单响应失败: %w", err) }
-    if resp.Code != "0" { return nil, fmt.Errorf("OKX下单失败: code=%s msg=%s", resp.Code, resp.Msg) }
+    if resp.Code != "0" {
+        detail := ""
+        if len(resp.Data) > 0 && (resp.Data[0].SCode != "" || resp.Data[0].SMsg != "") {
+            detail = fmt.Sprintf(" detail: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+        }
+        return nil, fmt.Errorf("OKX下单失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
+    }
+    if len(resp.Data) > 0 && resp.Data[0].SCode != "" && resp.Data[0].SCode != "0" {
+        return nil, fmt.Errorf("OKX下单失败: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+    }
     return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
 }
 
@@ -273,16 +359,54 @@ func (o *OKXTrader) CloseLong(symbol string, quantity float64) (map[string]inter
     instID := toOKXInstID(symbol)
     ctVal := o.getCTVal(instID)
     if ctVal <= 0 { ctVal = 1.0 }
+    // 支持 quantity==0 表示全平仓：查询当前持仓张数
     contracts := quantity / ctVal
+    if quantity <= 0 {
+        c, err := o.getPositionContracts(instID, "long")
+        if err != nil {
+            return nil, fmt.Errorf("无法获取多仓持仓张数: %w", err)
+        }
+        contracts = c
+    }
     if contracts <= 0 { return nil, fmt.Errorf("下单数量过小") }
     sz := fmt.Sprintf("%.3f", contracts)
 
-    payload := fmt.Sprintf(`{"instId":"%s","tdMode":"cross","side":"sell","ordType":"market","sz":"%s","reduceOnly":"true"}`, instID, sz)
-    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order", payload)
+    // 使用结构体生成 JSON，保证字段类型正确（reduceOnly 为布尔）
+    posMode := o.getPositionMode()
+    req := map[string]interface{}{
+        "instId":     instID,
+        "tdMode":     "isolated",
+        "side":       "sell",
+        "ordType":    "market",
+        "sz":         sz,
+        "reduceOnly": true,
+    }
+    if strings.EqualFold(posMode, "long_short_mode") {
+        req["posSide"] = "long"
+    }
+    payloadBytes, _ := json.Marshal(req)
+    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order", string(payloadBytes))
     if err != nil { return nil, err }
-    var resp struct { Code string `json:"code"`; Msg string `json:"msg"`; Data []struct{ OrdID string `json:"ordId"` } `json:"data"` }
+    var resp struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            OrdID string `json:"ordId"`
+            SCode string `json:"sCode"`
+            SMsg  string `json:"sMsg"`
+        } `json:"data"`
+    }
     if err := json.Unmarshal(respBody, &resp); err != nil { return nil, fmt.Errorf("解析下单响应失败: %w", err) }
-    if resp.Code != "0" { return nil, fmt.Errorf("OKX平仓失败: code=%s msg=%s", resp.Code, resp.Msg) }
+    if resp.Code != "0" {
+        detail := ""
+        if len(resp.Data) > 0 && (resp.Data[0].SCode != "" || resp.Data[0].SMsg != "") {
+            detail = fmt.Sprintf(" detail: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+        }
+        return nil, fmt.Errorf("OKX平仓失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
+    }
+    if len(resp.Data) > 0 && resp.Data[0].SCode != "" && resp.Data[0].SCode != "0" {
+        return nil, fmt.Errorf("OKX平仓失败: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+    }
     return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
 }
 
@@ -294,23 +418,62 @@ func (o *OKXTrader) CloseShort(symbol string, quantity float64) (map[string]inte
     instID := toOKXInstID(symbol)
     ctVal := o.getCTVal(instID)
     if ctVal <= 0 { ctVal = 1.0 }
+    // 支持 quantity==0 表示全平仓：查询当前持仓张数
     contracts := quantity / ctVal
+    if quantity <= 0 {
+        c, err := o.getPositionContracts(instID, "short")
+        if err != nil {
+            return nil, fmt.Errorf("无法获取空仓持仓张数: %w", err)
+        }
+        contracts = c
+    }
     if contracts <= 0 { return nil, fmt.Errorf("下单数量过小") }
     sz := fmt.Sprintf("%.3f", contracts)
 
-    payload := fmt.Sprintf(`{"instId":"%s","tdMode":"cross","side":"buy","ordType":"market","sz":"%s","reduceOnly":"true"}`, instID, sz)
-    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order", payload)
+    // 使用结构体生成 JSON，保证字段类型正确（reduceOnly 为布尔）
+    posMode := o.getPositionMode()
+    req := map[string]interface{}{
+        "instId":     instID,
+        "tdMode":     "isolated",
+        "side":       "buy",
+        "ordType":    "market",
+        "sz":         sz,
+        "reduceOnly": true,
+    }
+    if strings.EqualFold(posMode, "long_short_mode") {
+        req["posSide"] = "short"
+    }
+    payloadBytes, _ := json.Marshal(req)
+    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order", string(payloadBytes))
     if err != nil { return nil, err }
-    var resp struct { Code string `json:"code"`; Msg string `json:"msg"`; Data []struct{ OrdID string `json:"ordId"` } `json:"data"` }
+    var resp struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            OrdID string `json:"ordId"`
+            SCode string `json:"sCode"`
+            SMsg  string `json:"sMsg"`
+        } `json:"data"`
+    }
     if err := json.Unmarshal(respBody, &resp); err != nil { return nil, fmt.Errorf("解析下单响应失败: %w", err) }
-    if resp.Code != "0" { return nil, fmt.Errorf("OKX平仓失败: code=%s msg=%s", resp.Code, resp.Msg) }
+    if resp.Code != "0" {
+        detail := ""
+        if len(resp.Data) > 0 && (resp.Data[0].SCode != "" || resp.Data[0].SMsg != "") {
+            detail = fmt.Sprintf(" detail: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+        }
+        return nil, fmt.Errorf("OKX平仓失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
+    }
+    if len(resp.Data) > 0 && resp.Data[0].SCode != "" && resp.Data[0].SCode != "0" {
+        return nil, fmt.Errorf("OKX平仓失败: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+    }
     return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
 }
 
 // SetLeverage 设置杠杆
 func (o *OKXTrader) SetLeverage(symbol string, leverage int) error {
     instID := toOKXInstID(symbol)
-    payload := fmt.Sprintf(`{"instId":"%s","lever":"%d","mgnMode":"cross"}`, instID, leverage)
+    // 与下单使用的 tdMode 保持一致（isolated），减少模式不一致导致的失败
+    payload := fmt.Sprintf(`{"instId":"%s","lever":"%d","mgnMode":"isolated"}`, instID, leverage)
     respBody, err := o.doSignedRequest("POST", "/api/v5/account/set-leverage", payload)
     if err != nil { return err }
     var resp struct { Code string `json:"code"`; Msg string `json:"msg"` }
@@ -363,7 +526,105 @@ func (o *OKXTrader) CancelAllOrders(symbol string) error {
 
 // FormatQuantity 简单格式化（OKX最小数量因合约不同而异，这里采用保守的3位小数）
 func (o *OKXTrader) FormatQuantity(symbol string, quantity float64) (string, error) {
-    return fmt.Sprintf("%.3f", quantity), nil
+    return fmt.Sprintf("%.6f", quantity), nil
+}
+
+// ===== 额外的OKX专用方法 =====
+
+// getPositionContracts 查询指定合约与方向的当前持仓张数（返回绝对值）
+func (o *OKXTrader) getPositionContracts(instID string, posSide string) (float64, error) {
+    path := fmt.Sprintf("/api/v5/account/positions?instId=%s", instID)
+    respBody, err := o.doSignedRequest("GET", path, "")
+    if err != nil {
+        return 0, err
+    }
+    var payload struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            InstID  string `json:"instId"`
+            Pos     string `json:"pos"`
+            PosSide string `json:"posSide"`
+        } `json:"data"`
+    }
+    if err := json.Unmarshal(respBody, &payload); err != nil {
+        return 0, err
+    }
+    if payload.Code != "0" {
+        return 0, fmt.Errorf("OKX positions API error: code=%s msg=%s", payload.Code, payload.Msg)
+    }
+    for _, p := range payload.Data {
+        if p.InstID != instID {
+            continue
+        }
+        // 双向持仓模式优先匹配 posSide；净持仓模式下 posSide 可能为空，使用张数符号判断方向
+        if strings.EqualFold(p.PosSide, posSide) || p.PosSide == "" {
+            contracts := parseFloat(p.Pos)
+            if contracts < 0 {
+                contracts = -contracts
+            }
+            if contracts > 0 {
+                return contracts, nil
+            }
+        }
+    }
+    return 0, fmt.Errorf("no %s position for %s", posSide, instID)
+}
+
+// GetFills 获取近期成交记录（私有接口）
+func (o *OKXTrader) GetFills(limit int) ([]map[string]interface{}, error) {
+    if o.apiKey == "" || o.secretKey == "" || o.passphrase == "" {
+        return nil, fmt.Errorf("OKX API keys are not configured")
+    }
+    if limit <= 0 {
+        limit = 50
+    }
+    path := fmt.Sprintf("/api/v5/trade/fills?instType=SWAP&limit=%d", limit)
+    respBody, err := o.doSignedRequest("GET", path, "")
+    if err != nil {
+        return nil, err
+    }
+    var payload struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            InstID  string `json:"instId"`
+            Side    string `json:"side"`
+            PosSide string `json:"posSide"`
+            Px      string `json:"px"`
+            FillSz  string `json:"fillSz"`
+            TradeID string `json:"tradeId"`
+            Ts      string `json:"ts"`
+        } `json:"data"`
+    }
+    if err := json.Unmarshal(respBody, &payload); err != nil {
+        return nil, fmt.Errorf("解析成交记录失败: %w", err)
+    }
+    if payload.Code != "0" {
+        return nil, fmt.Errorf("OKX fills API error: code=%s msg=%s", payload.Code, payload.Msg)
+    }
+
+    var result []map[string]interface{}
+    for _, f := range payload.Data {
+        symbol := fromOKXInstID(f.InstID)
+        price := parseFloat(f.Px)
+        contracts := parseFloat(f.FillSz)
+        ctVal := o.getCTVal(f.InstID)
+        if ctVal <= 0 { ctVal = 1.0 }
+        qty := contracts * ctVal
+        result = append(result, map[string]interface{}{
+            "symbol":    symbol,
+            "inst_id":   f.InstID,
+            "side":      f.Side,
+            "pos_side":  f.PosSide,
+            "price":     price,
+            "contracts": contracts,
+            "quantity":  qty,
+            "trade_id":  f.TradeID,
+            "timestamp": f.Ts,
+        })
+    }
+    return result, nil
 }
 
 // ===== 辅助函数 =====
@@ -455,6 +716,8 @@ func (o *OKXTrader) getCTVal(instID string) float64 {
         Msg  string `json:"msg"`
         Data []struct {
             CtVal string `json:"ctVal"`
+            LotSz string `json:"lotSz"`
+            MinSz string `json:"minSz"`
         } `json:"data"`
     }
     if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
@@ -467,8 +730,126 @@ func (o *OKXTrader) getCTVal(instID string) float64 {
     if ct <= 0 {
         ct = 1.0
     }
+    lot := parseFloat(payload.Data[0].LotSz)
+    min := parseFloat(payload.Data[0].MinSz)
     o.cacheMu.Lock()
     o.ctValCache[instID] = ct
+    if lot > 0 { o.lotSzCache[instID] = lot }
+    if min > 0 { o.minSzCache[instID] = min }
     o.cacheMu.Unlock()
     return ct
+}
+
+// getInstrumentSpec 获取合约规格（ctVal, lotSz, minSz）并返回是否存在
+func (o *OKXTrader) getInstrumentSpec(instID string) (ctVal, lotSz, minSz float64, exists bool) {
+    // 先尝试缓存
+    o.cacheMu.RLock()
+    ctVal, ctOk := o.ctValCache[instID]
+    lotSz, lotOk := o.lotSzCache[instID]
+    minSz, minOk := o.minSzCache[instID]
+    o.cacheMu.RUnlock()
+    if ctOk && lotOk && minOk && ctVal > 0 {
+        return ctVal, lotSz, minSz, true
+    }
+    // 直接调用公共接口
+    url := fmt.Sprintf("%s/api/v5/public/instruments?instType=SWAP&instId=%s", o.baseURL, instID)
+    resp, err := o.client.Get(url)
+    if err != nil {
+        return 0, 0, 0, false
+    }
+    defer resp.Body.Close()
+    var payload struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            CtVal string `json:"ctVal"`
+            LotSz string `json:"lotSz"`
+            MinSz string `json:"minSz"`
+        } `json:"data"`
+    }
+    if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+        return 0, 0, 0, false
+    }
+    if payload.Code != "0" || len(payload.Data) == 0 {
+        return 0, 0, 0, false
+    }
+    ctVal = parseFloat(payload.Data[0].CtVal)
+    lotSz = parseFloat(payload.Data[0].LotSz)
+    minSz = parseFloat(payload.Data[0].MinSz)
+    if ctVal <= 0 { ctVal = 1.0 }
+    o.cacheMu.Lock()
+    o.ctValCache[instID] = ctVal
+    if lotSz > 0 { o.lotSzCache[instID] = lotSz }
+    if minSz > 0 { o.minSzCache[instID] = minSz }
+    o.cacheMu.Unlock()
+    return ctVal, lotSz, minSz, true
+}
+
+// getPositionMode 获取账户持仓模式（long_short_mode 或 net_mode），失败时返回空字符串
+func (o *OKXTrader) getPositionMode() string {
+    // 优先返回缓存（60秒）
+    if o.posModeCache != "" && time.Since(o.posModeCacheTime) < 60*time.Second {
+        return o.posModeCache
+    }
+
+    // 尝试读取账户配置（最多两次）
+    var posMode string
+    for i := 0; i < 2; i++ {
+        respBody, err := o.doSignedRequest("GET", "/api/v5/account/config", "")
+        if err != nil {
+            continue
+        }
+        var payload struct {
+            Code string `json:"code"`
+            Msg  string `json:"msg"`
+            Data []struct {
+                PosMode string `json:"posMode"`
+            } `json:"data"`
+        }
+        if err := json.Unmarshal(respBody, &payload); err != nil {
+            continue
+        }
+        if payload.Code == "0" && len(payload.Data) > 0 && payload.Data[0].PosMode != "" {
+            posMode = payload.Data[0].PosMode
+            break
+        }
+    }
+
+    // 若成功获取，写入缓存
+    if posMode != "" {
+        o.posModeCache = posMode
+        o.posModeCacheTime = time.Now()
+        return posMode
+    }
+
+    // 回退：尝试通过持仓数据推断
+    respBody, err := o.doSignedRequest("GET", "/api/v5/account/positions?instType=SWAP", "")
+    if err == nil {
+        var payload struct {
+            Code string `json:"code"`
+            Msg  string `json:"msg"`
+            Data []struct {
+                PosSide string `json:"posSide"`
+            } `json:"data"`
+        }
+        if json.Unmarshal(respBody, &payload) == nil && payload.Code == "0" && len(payload.Data) > 0 {
+            hasPosSide := false
+            for _, p := range payload.Data {
+                if strings.TrimSpace(p.PosSide) != "" {
+                    hasPosSide = true
+                    break
+                }
+            }
+            if hasPosSide {
+                o.posModeCache = "long_short_mode"
+            } else {
+                o.posModeCache = "net_mode"
+            }
+            o.posModeCacheTime = time.Now()
+            return o.posModeCache
+        }
+    }
+
+    // 仍失败时返回空字符串
+    return ""
 }

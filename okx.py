@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import schedule
 from openai import OpenAI
@@ -126,10 +127,10 @@ def get_contract_specs(inst_id='OKB-USDT-SWAP'):
     }
 
 
-def calculate_position_size(price, target_notional=5.0):
-    """根据目标价值和价格计算仓位大小"""
+def calculate_position_size(price, target_notional=5.0, inst_id='OKB-USDT-SWAP'):
+    """根据目标价值和价格计算仓位大小（支持指定合约）"""
     try:
-        contract_spec = get_contract_specs('OKB-USDT-SWAP')
+        contract_spec = get_contract_specs(inst_id)
         contract_value = contract_spec['contract_value']
 
         # 计算需要的合约张数：目标价值 / (合约面值 * 价格)
@@ -151,7 +152,7 @@ def calculate_position_size(price, target_notional=5.0):
         required_margin = actual_notional / TRADE_CONFIG['leverage']
 
         print(f"🎯 仓位计算: 目标{target_notional}USD, 价格${price:.2f}")
-        print(f"📊 合约面值: {contract_value}OKB, 需要{adjusted_contracts:.4f}张合约")
+        print(f"📊 合约面值: {contract_value} 合约币种面值, 需要{adjusted_contracts:.4f}张合约")
         print(f"💰 实际开仓价值: ${actual_notional:.2f}, 所需保证金: ${required_margin:.4f}")
 
         return adjusted_contracts, actual_notional, required_margin
@@ -675,8 +676,12 @@ def execute_trade(signal_data, price_data):
         return
 
     try:
-        # 计算仓位大小
-        position_size, actual_notional, required_margin = calculate_position_size(current_price)
+        # 计算仓位大小（固定OKB合约）
+        position_size, actual_notional, required_margin = calculate_position_size(
+            current_price,
+            TRADE_CONFIG['target_notional'],
+            'OKB-USDT-SWAP'
+        )
 
         # 严格的余额检查
         usdt_balance = get_usdt_balance()
@@ -779,6 +784,172 @@ def execute_trade(signal_data, price_data):
         print(f"❌ 订单执行失败: {e}")
 
 
+def get_instrument_ohlcv_enhanced(inst_id):
+    """通用获取任意合约的K线数据并计算技术指标"""
+    symbol = inst_id.replace('-USDT-SWAP', '/USDT:USDT')
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            print(f"📊 获取{inst_id} K线数据 (第{attempt + 1}次尝试)...")
+            ohlcv = exchange.fetch_ohlcv(symbol, TRADE_CONFIG['timeframe'],
+                                         limit=TRADE_CONFIG['data_points'])
+
+            if not ohlcv or len(ohlcv) == 0:
+                if attempt < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                return None
+
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df = calculate_technical_indicators(df)
+
+            current_data = df.iloc[-1]
+            previous_data = df.iloc[-2]
+            trend_analysis = get_market_trend(df)
+
+            return {
+                'inst_id': inst_id,
+                'symbol': symbol,
+                'price': float(current_data['close']),
+                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'high': float(current_data['high']),
+                'low': float(current_data['low']),
+                'volume': float(current_data['volume']),
+                'timeframe': TRADE_CONFIG['timeframe'],
+                'price_change': float(
+                    ((current_data['close'] - previous_data['close']) / max(previous_data['close'], 0.0001)) * 100),
+                'technical_data': {
+                    'rsi': float(current_data.get('rsi', 0)),
+                    'macd': float(current_data.get('macd', 0)),
+                    'macd_signal': float(current_data.get('macd_signal', 0)),
+                },
+                'trend_analysis': trend_analysis,
+                'full_data': df
+            }
+        except Exception as e:
+            print(f"❌ 获取{inst_id} K线数据失败 (第{attempt + 1}次): {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+            else:
+                return None
+    return None
+
+
+def select_new_swap_via_ai(candidates=None):
+    """让AI在候选合约中选择一个适合BUY的标的，返回instId与价格数据"""
+    if candidates is None:
+        candidates = ['BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'TON-USDT-SWAP', 'DOGE-USDT-SWAP']
+
+    market_snapshots = []
+    for inst_id in candidates:
+        data = get_instrument_ohlcv_enhanced(inst_id)
+        if data:
+            market_snapshots.append(data)
+
+    if not market_snapshots:
+        print("❌ 无法获取候选市场数据，放弃选择")
+        return None, None
+
+    if deepseek_client:
+        summary = []
+        for s in market_snapshots:
+            summary.append(
+                f"{s['inst_id']}: price=${s['price']:.2f}, change={s['price_change']:+.2f}%, "
+                f"trend={s['trend_analysis'].get('overall','N/A')}, RSI={s['technical_data'].get('rsi',0):.1f}"
+            )
+        prompt = (
+            "请从以下合约中挑选一个适合BUY开多的标的，谨慎避免RSI过高(>75)的过热；"
+            "考虑趋势、动量与基本风险，使用JSON输出：{\"instId\": ..., \"reason\": ...}.\n\n"
+            + "\n".join(summary)
+        )
+        try:
+            response = deepseek_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[{"role": "user", "content": prompt}],
+                stream=False,
+                temperature=0.1
+            )
+            result = response.choices[0].message.content
+            start_idx = result.find('{')
+            end_idx = result.rfind('}') + 1
+            if start_idx != -1 and end_idx != 0:
+                js = json.loads(result[start_idx:end_idx])
+                inst_id = js.get('instId')
+                if inst_id:
+                    for s in market_snapshots:
+                        if s['inst_id'] == inst_id:
+                            print(f"🧠 AI选择: {inst_id}, 原因: {js.get('reason','')} ")
+                            return inst_id, s
+        except Exception as e:
+            print(f"⚠️ AI选择失败，采用回退策略: {e}")
+
+    # 回退：选择涨幅较优但RSI不过热的标的
+    filtered = [s for s in market_snapshots if s['technical_data'].get('rsi', 0) < 75]
+    chosen = max(filtered or market_snapshots, key=lambda s: s['price_change'])
+    print(f"🔎 回退选择: {chosen['inst_id']} (change={chosen['price_change']:+.2f}%)")
+    return chosen['inst_id'], chosen
+
+
+def open_long_on_instrument(inst_id, price_data):
+    """在指定合约开多"""
+    if TRADE_CONFIG['test_mode']:
+        print("🧪 测试模式 - 仅模拟交易")
+        return
+
+    try:
+        current_price = price_data['price']
+        size, notional, margin = calculate_position_size(
+            current_price, TRADE_CONFIG['target_notional'], inst_id
+        )
+
+        usdt_balance = get_usdt_balance()
+        if margin > usdt_balance * 0.6:
+            print("❌ 保证金不足，取消开仓")
+            return
+        if notional > TRADE_CONFIG['max_position_value']:
+            print("❌ 开仓价值超过限制，取消")
+            return
+        if notional < 3.0:
+            print("⚠️ 开仓价值过小，可能不划算，取消")
+            return
+
+        print(f"📈 在 {inst_id} 开多 {size} 张 (估值 ${notional:.2f})...")
+        params = {
+            'instId': inst_id,
+            'tdMode': 'isolated',
+            'side': 'buy',
+            'posSide': 'long',
+            'ordType': 'market',
+            'sz': str(size)
+        }
+        resp = exchange.privatePostTradeOrder(params)
+        if resp.get('code') == '0':
+            print("✅ 开多成功")
+        else:
+            print(f"⚠️ 开多返回: {resp}")
+    except Exception as e:
+        print(f"❌ 开多失败: {e}")
+
+
+def flatten_okb_then_ai_buy():
+    """平掉OKB双向持仓后，AI挑选新币并开多一次"""
+    print("🔄 开始一键平仓并购买新标的...")
+    cancel_all_open_orders()
+    time.sleep(2)
+    close_all_positions()
+    time.sleep(3)
+
+    # 选择新标的
+    inst_id, pdata = select_new_swap_via_ai()
+    if not inst_id or not pdata:
+        print("❌ 无法选出新标的，流程结束")
+        return
+
+    # 执行开多
+    open_long_on_instrument(inst_id, pdata)
+
+
 def wait_for_next_period():
     """等待到下一个5分钟整点"""
     now = datetime.now()
@@ -863,6 +1034,12 @@ def main():
 
     if not setup_exchange():
         print("❌ 交易所设置失败")
+        return
+
+    # 一次性执行：平OKB并购买新标的
+    op = os.getenv('OPERATION', '').strip()
+    if '--flatten-and-buy' in sys.argv or op == 'flatten_okb_then_buy_new':
+        flatten_okb_then_ai_buy()
         return
 
     print("🔁 开始主循环...")

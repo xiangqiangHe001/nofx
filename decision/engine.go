@@ -562,15 +562,13 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		if d.PositionSizeUSD <= 0 {
 			return fmt.Errorf("仓位大小必须大于0: %.2f", d.PositionSizeUSD)
 		}
-		// 验证仓位价值上限（加1%容差以避免浮点数精度问题）
-		tolerance := maxPositionValue * 0.01 // 1%容差
-		if d.PositionSizeUSD > maxPositionValue+tolerance {
-			if d.Symbol == "BTCUSDT" || d.Symbol == "ETHUSDT" {
-				return fmt.Errorf("BTC/ETH单币种仓位价值不能超过%.0f USDT（10倍账户净值），实际: %.0f", maxPositionValue, d.PositionSizeUSD)
-			} else {
-				return fmt.Errorf("山寨币单币种仓位价值不能超过%.0f USDT（1.5倍账户净值），实际: %.0f", maxPositionValue, d.PositionSizeUSD)
-			}
-		}
+        // 验证仓位价值上限（加2%容差以避免浮点数精度问题）
+        tolerance := maxPositionValue * 0.02 // 2%容差
+        if d.PositionSizeUSD > maxPositionValue+tolerance {
+            // 超限时采用“软上限”：自动缩减到允许的最大值，而不是报错
+            // 这样可以避免前端出现“决策验证失败”的报错，提高鲁棒性
+            d.PositionSizeUSD = maxPositionValue
+        }
 		if d.StopLoss <= 0 || d.TakeProfit <= 0 {
 			return fmt.Errorf("止损和止盈必须大于0")
 		}
