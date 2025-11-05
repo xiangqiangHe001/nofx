@@ -607,8 +607,9 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
     actionRecord.Quantity = quantity
     actionRecord.Price = marketData.CurrentPrice
 
-    if at.config.DryRun || !at.executionEnabled {
-        log.Printf("  🚫 DryRun/未启用执行：跳过开多 %s，杠杆=%d，仓位USD=%.2f", decision.Symbol, decision.Leverage, decision.PositionSizeUSD)
+    // 统一为直接执行：仅当执行被明确关闭时才模拟/跳过
+    if !at.executionEnabled {
+        log.Printf("  🚫 未启用执行：跳过开多 %s，杠杆=%d，仓位USD=%.2f", decision.Symbol, decision.Leverage, decision.PositionSizeUSD)
         return nil
     }
 
@@ -663,8 +664,9 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
     actionRecord.Quantity = quantity
     actionRecord.Price = marketData.CurrentPrice
 
-    if at.config.DryRun || !at.executionEnabled {
-        log.Printf("  🚫 DryRun/未启用执行：跳过开空 %s，杠杆=%d，仓位USD=%.2f", decision.Symbol, decision.Leverage, decision.PositionSizeUSD)
+    // 统一为直接执行：仅当执行被明确关闭时才模拟/跳过
+    if !at.executionEnabled {
+        log.Printf("  🚫 未启用执行：跳过开空 %s，杠杆=%d，仓位USD=%.2f", decision.Symbol, decision.Leverage, decision.PositionSizeUSD)
         return nil
     }
 
@@ -708,6 +710,127 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
     return nil
 }
 
+// ManualOpenLong 手动开多（用于测试/调试接口）
+func (at *AutoTrader) ManualOpenLong(symbol string, usd float64, leverage int) (map[string]interface{}, error) {
+    if !at.executionEnabled {
+        return nil, fmt.Errorf("execution disabled: 跳过开多 %s", symbol)
+    }
+
+    // 获取当前价格并计算数量
+    price, err := at.trader.GetMarketPrice(symbol)
+    if err != nil {
+        return nil, fmt.Errorf("获取价格失败: %w", err)
+    }
+    if price <= 0 {
+        return nil, fmt.Errorf("无效价格: %.8f", price)
+    }
+    if usd <= 0 {
+        return nil, fmt.Errorf("USD仓位必须大于0")
+    }
+    quantity := usd / price
+
+    // 防止同向仓位叠加
+    positions, err := at.trader.GetPositions()
+    if err == nil {
+        for _, pos := range positions {
+            if pos["symbol"] == symbol && pos["side"] == "long" {
+                return nil, fmt.Errorf("%s 已有多仓，拒绝重复开仓", symbol)
+            }
+        }
+    }
+
+    // 执行开仓
+    order, err := at.trader.OpenLong(symbol, quantity, leverage)
+    if err != nil {
+        return nil, err
+    }
+
+    // 记录开仓时间用于风控与学习分析
+    posKey := symbol + "_long"
+    at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
+
+    // 设置止损止盈（使用简单的保护：按5%/10%作为默认）
+    // 注意：不同交易器实现可选择忽略或使用标记
+    stopPrice := price * 0.95
+    takeProfit := price * 1.10
+    if err := at.trader.SetStopLoss(symbol, "LONG", quantity, stopPrice); err != nil {
+        log.Printf("  ⚠ 设置止损失败(手动): %v", err)
+    }
+    if err := at.trader.SetTakeProfit(symbol, "LONG", quantity, takeProfit); err != nil {
+        log.Printf("  ⚠ 设置止盈失败(手动): %v", err)
+    }
+
+    return order, nil
+}
+
+// ManualOpenShort 手动开空（用于测试/调试接口）
+func (at *AutoTrader) ManualOpenShort(symbol string, usd float64, leverage int) (map[string]interface{}, error) {
+    if !at.executionEnabled {
+        return nil, fmt.Errorf("execution disabled: 跳过开空 %s", symbol)
+    }
+
+    // 获取当前价格并计算数量
+    price, err := at.trader.GetMarketPrice(symbol)
+    if err != nil {
+        return nil, fmt.Errorf("获取价格失败: %w", err)
+    }
+    if price <= 0 {
+        return nil, fmt.Errorf("无效价格: %.8f", price)
+    }
+    if usd <= 0 {
+        return nil, fmt.Errorf("USD仓位必须大于0")
+    }
+    quantity := usd / price
+
+    // 防止同向仓位叠加
+    positions, err := at.trader.GetPositions()
+    if err == nil {
+        for _, pos := range positions {
+            if pos["symbol"] == symbol && pos["side"] == "short" {
+                return nil, fmt.Errorf("%s 已有空仓，拒绝重复开仓", symbol)
+            }
+        }
+    }
+
+    // 执行开仓
+    order, err := at.trader.OpenShort(symbol, quantity, leverage)
+    if err != nil {
+        return nil, err
+    }
+
+    // 记录开仓时间用于风控与学习分析
+    posKey := symbol + "_short"
+    at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
+
+    // 设置止损止盈（使用简单的保护：按5%/10%作为默认）
+    stopPrice := price * 1.05
+    takeProfit := price * 0.90
+    if err := at.trader.SetStopLoss(symbol, "SHORT", quantity, stopPrice); err != nil {
+        log.Printf("  ⚠ 设置止损失败(手动): %v", err)
+    }
+    if err := at.trader.SetTakeProfit(symbol, "SHORT", quantity, takeProfit); err != nil {
+        log.Printf("  ⚠ 设置止盈失败(手动): %v", err)
+    }
+
+    return order, nil
+}
+
+// ManualCloseLong 手动平多（quantity=0 全平）
+func (at *AutoTrader) ManualCloseLong(symbol string) (map[string]interface{}, error) {
+    if !at.executionEnabled {
+        return nil, fmt.Errorf("execution disabled: 跳过平多 %s", symbol)
+    }
+    return at.trader.CloseLong(symbol, 0)
+}
+
+// ManualCloseShort 手动平空（quantity=0 全平）
+func (at *AutoTrader) ManualCloseShort(symbol string) (map[string]interface{}, error) {
+    if !at.executionEnabled {
+        return nil, fmt.Errorf("execution disabled: 跳过平空 %s", symbol)
+    }
+    return at.trader.CloseShort(symbol, 0)
+}
+
 // executeCloseLongWithRecord 执行平多仓并记录详细信息
 func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
     // 获取当前价格（即使在 DryRun/未执行时也补齐记录字段）
@@ -717,8 +840,9 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
     }
     actionRecord.Price = marketData.CurrentPrice
 
-    if at.config.DryRun || !at.executionEnabled {
-        log.Printf("  🚫 DryRun/未启用执行：跳过平多 %s", decision.Symbol)
+    // 统一为直接执行：仅当执行被明确关闭时才模拟/跳过
+    if !at.executionEnabled {
+        log.Printf("  🚫 未启用执行：跳过平多 %s", decision.Symbol)
         return nil
     }
     log.Printf("  🔄 平多仓: %s", decision.Symbol)
@@ -747,8 +871,9 @@ func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, a
     }
     actionRecord.Price = marketData.CurrentPrice
 
-    if at.config.DryRun || !at.executionEnabled {
-        log.Printf("  🚫 DryRun/未启用执行：跳过平空 %s", decision.Symbol)
+    // 统一为直接执行：仅当执行被明确关闭时才模拟/跳过
+    if !at.executionEnabled {
+        log.Printf("  🚫 未启用执行：跳过平空 %s", decision.Symbol)
         return nil
     }
     log.Printf("  🔄 平空仓: %s", decision.Symbol)

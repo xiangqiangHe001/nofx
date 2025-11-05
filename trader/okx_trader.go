@@ -91,7 +91,7 @@ func (o *OKXTrader) GetBalance() (map[string]interface{}, error) {
     }
 
     if err := json.Unmarshal(respBody, &payload); err != nil {
-        return nil, fmt.Errorf("failed to parse balance response: %w")
+        return nil, fmt.Errorf("failed to parse balance response: %w", err)
     }
     if payload.Code != "0" || len(payload.Data) == 0 {
         return nil, fmt.Errorf("OKX balance API error: code=%s msg=%s", payload.Code, payload.Msg)
@@ -138,7 +138,7 @@ func (o *OKXTrader) GetPositions() ([]map[string]interface{}, error) {
     body := ""
     respBody, err := o.doSignedRequest("GET", path, body)
     if err != nil {
-        return nil, fmt.Errorf("failed to get positions: %w")
+        return nil, fmt.Errorf("failed to get positions: %w", err)
     }
 
     var payload struct {
@@ -155,7 +155,7 @@ func (o *OKXTrader) GetPositions() ([]map[string]interface{}, error) {
         } `json:"data"`
     }
     if err := json.Unmarshal(respBody, &payload); err != nil {
-        return nil, fmt.Errorf("failed to parse positions response: %w")
+        return nil, fmt.Errorf("failed to parse positions response: %w", err)
     }
     if payload.Code != "0" {
         return nil, fmt.Errorf("OKX positions API error: code=%s msg=%s", payload.Code, payload.Msg)
@@ -218,10 +218,12 @@ func (o *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map
         return nil, fmt.Errorf("OKX未配置API密钥")
     }
     instID := toOKXInstID(symbol)
-    // 设置杠杆（失败则直接返回，避免风控拒绝导致通用错误）
+    // 设置杠杆（失败不阻断开仓，继续尝试下单）
     if err := o.SetLeverage(symbol, leverage); err != nil {
-        return nil, fmt.Errorf("设置杠杆失败: %w", err)
+        log.Printf("⚠️ 设置杠杆失败(继续尝试下单): %v", err)
     }
+    // 避免后台杠杆变更存在传播延迟，短暂等待后再下单
+    time.Sleep(2500 * time.Millisecond)
 
     // 获取合约规格（面值、最小张数、步进张数）并校验
     ctVal, lotSz, minSz, exists := o.getInstrumentSpec(instID)
@@ -286,9 +288,70 @@ func (o *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map
                 log.Printf("⚠️ 检测到账户模式错误51010，已清除持仓模式缓存，请重新尝试下单")
             }
         }
+        // 针对 51000/51010 执行一次自动重试：刷新持仓模式 -> 重新设置杠杆 -> 延时 -> 重新下单
+        if resp.Code == "51000" || (len(resp.Data) > 0 && (resp.Data[0].SCode == "51000" || resp.Data[0].SCode == "51010")) {
+            log.Printf("⚠️ 触发51000/51010错误，开始自动重试开多：刷新账户模式并重新设置杠杆")
+            o.posModeCache = ""
+            o.posModeCacheTime = time.Time{}
+            posMode = o.getPositionMode()
+            if err := o.SetLeverage(symbol, leverage); err != nil {
+                log.Printf("⚠️ 重试设置杠杆失败(继续尝试下单): %v", err)
+            }
+            time.Sleep(2500 * time.Millisecond)
+            // 重新构建请求
+            req = map[string]interface{}{
+                "instId": instID,
+                "tdMode": "isolated",
+                "side":   "buy",
+                "ordType": "market",
+                "sz":     sz,
+            }
+            if strings.EqualFold(posMode, "long_short_mode") {
+                req["posSide"] = "long"
+            }
+            payloadBytes, _ = json.Marshal(req)
+            respBody, err = o.doSignedRequest("POST", "/api/v5/trade/order", string(payloadBytes))
+            if err == nil {
+                if err := json.Unmarshal(respBody, &resp); err == nil {
+                    if resp.Code == "0" && len(resp.Data) > 0 && resp.Data[0].OrdID != "" {
+                        return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
+                    }
+                }
+            }
+        }
         return nil, fmt.Errorf("OKX下单失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
     }
     if len(resp.Data) > 0 && resp.Data[0].SCode != "" && resp.Data[0].SCode != "0" {
+        // 针对 51000/51010 执行一次自动重试
+        if resp.Data[0].SCode == "51000" || resp.Data[0].SCode == "51010" {
+            log.Printf("⚠️ 触发sCode=%s错误，开始自动重试开多：刷新账户模式并重新设置杠杆", resp.Data[0].SCode)
+            o.posModeCache = ""
+            o.posModeCacheTime = time.Time{}
+            posMode = o.getPositionMode()
+            if err := o.SetLeverage(symbol, leverage); err != nil {
+                log.Printf("⚠️ 重试设置杠杆失败(继续尝试下单): %v", err)
+            }
+            time.Sleep(2500 * time.Millisecond)
+            req = map[string]interface{}{
+                "instId": instID,
+                "tdMode": "isolated",
+                "side":   "buy",
+                "ordType": "market",
+                "sz":     sz,
+            }
+            if strings.EqualFold(posMode, "long_short_mode") {
+                req["posSide"] = "long"
+            }
+            payloadBytes, _ = json.Marshal(req)
+            respBody, err = o.doSignedRequest("POST", "/api/v5/trade/order", string(payloadBytes))
+            if err == nil {
+                if err := json.Unmarshal(respBody, &resp); err == nil {
+                    if resp.Code == "0" && len(resp.Data) > 0 && resp.Data[0].OrdID != "" {
+                        return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
+                    }
+                }
+            }
+        }
         return nil, fmt.Errorf("OKX下单失败: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
     }
     result := map[string]interface{}{"orderId": resp.Data[0].OrdID}
@@ -301,9 +364,12 @@ func (o *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
         return nil, fmt.Errorf("OKX未配置API密钥")
     }
     instID := toOKXInstID(symbol)
+    // 设置杠杆（失败不阻断开仓，继续尝试下单）
     if err := o.SetLeverage(symbol, leverage); err != nil {
-        return nil, fmt.Errorf("设置杠杆失败: %w", err)
+        log.Printf("⚠️ 设置杠杆失败(继续尝试下单): %v", err)
     }
+    // 避免后台杠杆变更存在传播延迟，短暂等待后再下单
+    time.Sleep(2500 * time.Millisecond)
 
     // 获取合约规格并校验
     ctVal, lotSz, minSz, exists := o.getInstrumentSpec(instID)
@@ -359,9 +425,70 @@ func (o *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
                 log.Printf("⚠️ 检测到账户模式错误51010，已清除持仓模式缓存，请重新尝试下单")
             }
         }
+        // 针对 51000/51010 执行一次自动重试：刷新持仓模式 -> 重新设置杠杆 -> 延时 -> 重新下单
+        if resp.Code == "51000" || (len(resp.Data) > 0 && (resp.Data[0].SCode == "51000" || resp.Data[0].SCode == "51010")) {
+            log.Printf("⚠️ 触发51000/51010错误，开始自动重试开空：刷新账户模式并重新设置杠杆")
+            o.posModeCache = ""
+            o.posModeCacheTime = time.Time{}
+            posMode = o.getPositionMode()
+            if err := o.SetLeverage(symbol, leverage); err != nil {
+                log.Printf("⚠️ 重试设置杠杆失败(继续尝试下单): %v", err)
+            }
+            time.Sleep(2500 * time.Millisecond)
+            // 重新构建请求
+            req = map[string]interface{}{
+                "instId": instID,
+                "tdMode": "isolated",
+                "side":   "sell",
+                "ordType": "market",
+                "sz":     sz,
+            }
+            if strings.EqualFold(posMode, "long_short_mode") {
+                req["posSide"] = "short"
+            }
+            payloadBytes, _ = json.Marshal(req)
+            respBody, err = o.doSignedRequest("POST", "/api/v5/trade/order", string(payloadBytes))
+            if err == nil {
+                if err := json.Unmarshal(respBody, &resp); err == nil {
+                    if resp.Code == "0" && len(resp.Data) > 0 && resp.Data[0].OrdID != "" {
+                        return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
+                    }
+                }
+            }
+        }
         return nil, fmt.Errorf("OKX下单失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
     }
     if len(resp.Data) > 0 && resp.Data[0].SCode != "" && resp.Data[0].SCode != "0" {
+        // 针对 51000/51010 执行一次自动重试
+        if resp.Data[0].SCode == "51000" || resp.Data[0].SCode == "51010" {
+            log.Printf("⚠️ 触发sCode=%s错误，开始自动重试开空：刷新账户模式并重新设置杠杆", resp.Data[0].SCode)
+            o.posModeCache = ""
+            o.posModeCacheTime = time.Time{}
+            posMode = o.getPositionMode()
+            if err := o.SetLeverage(symbol, leverage); err != nil {
+                log.Printf("⚠️ 重试设置杠杆失败(继续尝试下单): %v", err)
+            }
+            time.Sleep(2500 * time.Millisecond)
+            req = map[string]interface{}{
+                "instId": instID,
+                "tdMode": "isolated",
+                "side":   "sell",
+                "ordType": "market",
+                "sz":     sz,
+            }
+            if strings.EqualFold(posMode, "long_short_mode") {
+                req["posSide"] = "short"
+            }
+            payloadBytes, _ = json.Marshal(req)
+            respBody, err = o.doSignedRequest("POST", "/api/v5/trade/order", string(payloadBytes))
+            if err == nil {
+                if err := json.Unmarshal(respBody, &resp); err == nil {
+                    if resp.Code == "0" && len(resp.Data) > 0 && resp.Data[0].OrdID != "" {
+                        return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
+                    }
+                }
+            }
+        }
         return nil, fmt.Errorf("OKX下单失败: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
     }
     return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
@@ -540,13 +667,56 @@ func (o *OKXTrader) CloseShort(symbol string, quantity float64) (map[string]inte
 // SetLeverage 设置杠杆
 func (o *OKXTrader) SetLeverage(symbol string, leverage int) error {
     instID := toOKXInstID(symbol)
-    // 与下单使用的 tdMode 保持一致（isolated），减少模式不一致导致的失败
+
+    // 检测账户持仓模式：long_short_mode 需要传 posSide；net_mode 不需要
+    posMode := o.getPositionMode()
+
+    // 优先尝试在双向持仓模式下分别为 long/short 设置杠杆，以避免未知侧的参数错误
+    if strings.EqualFold(posMode, "long_short_mode") {
+        // 为 long/short 两侧各设置一次杠杆
+        for _, side := range []string{"long", "short"} {
+            payload := fmt.Sprintf(`{"instId":"%s","lever":"%d","mgnMode":"isolated","posSide":"%s"}`, instID, leverage, side)
+            respBody, err := o.doSignedRequest("POST", "/api/v5/account/set-leverage", payload)
+            if err != nil {
+                return fmt.Errorf("设置杠杆失败(%s): %w", side, err)
+            }
+            var resp struct { Code string `json:"code"`; Msg string `json:"msg"` }
+            if err := json.Unmarshal(respBody, &resp); err != nil {
+                return fmt.Errorf("解析设置杠杆响应失败(%s): %w", side, err)
+            }
+            if resp.Code != "0" {
+                // 如果因账户模式导致错误，清除持仓模式缓存，便于后续重新检测
+                if resp.Code == "51010" && strings.Contains(resp.Msg, "account mode") {
+                    o.posModeCache = ""
+                    o.posModeCacheTime = time.Time{}
+                }
+                return fmt.Errorf("设置杠杆失败(%s): code=%s msg=%s", side, resp.Code, resp.Msg)
+            }
+        }
+        return nil
+    }
+
+    // 净持仓模式或未知模式：不传 posSide
     payload := fmt.Sprintf(`{"instId":"%s","lever":"%d","mgnMode":"isolated"}`, instID, leverage)
     respBody, err := o.doSignedRequest("POST", "/api/v5/account/set-leverage", payload)
     if err != nil { return err }
     var resp struct { Code string `json:"code"`; Msg string `json:"msg"` }
     if err := json.Unmarshal(respBody, &resp); err != nil { return fmt.Errorf("解析设置杠杆响应失败: %w", err) }
-    if resp.Code != "0" { return fmt.Errorf("设置杠杆失败: code=%s msg=%s", resp.Code, resp.Msg) }
+    if resp.Code != "0" {
+        // 如果提示需要 posSide，说明模式检测可能不准确，尝试为两侧设置一次
+        if resp.Code == "51000" && strings.Contains(strings.ToLower(resp.Msg), "posside") {
+            for _, side := range []string{"long", "short"} {
+                payload := fmt.Sprintf(`{"instId":"%s","lever":"%d","mgnMode":"isolated","posSide":"%s"}`, instID, leverage, side)
+                respBody2, err2 := o.doSignedRequest("POST", "/api/v5/account/set-leverage", payload)
+                if err2 != nil { return fmt.Errorf("设置杠杆失败(%s): %w", side, err2) }
+                var resp2 struct { Code string `json:"code"`; Msg string `json:"msg"` }
+                if err := json.Unmarshal(respBody2, &resp2); err != nil { return fmt.Errorf("解析设置杠杆响应失败(%s): %w", side, err) }
+                if resp2.Code != "0" { return fmt.Errorf("设置杠杆失败(%s): code=%s msg=%s", side, resp2.Code, resp2.Msg) }
+            }
+            return nil
+        }
+        return fmt.Errorf("设置杠杆失败: code=%s msg=%s", resp.Code, resp.Msg)
+    }
     return nil
 }
 

@@ -1,13 +1,15 @@
 package logger
 
 import (
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"math"
-	"os"
-	"path/filepath"
-	"time"
+    "encoding/json"
+    "fmt"
+    "io/ioutil"
+    "math"
+    "os"
+    "path/filepath"
+    "strconv"
+    "strings"
+    "time"
 )
 
 // DecisionRecord 决策记录
@@ -68,19 +70,52 @@ type DecisionLogger struct {
 
 // NewDecisionLogger 创建决策日志记录器
 func NewDecisionLogger(logDir string) *DecisionLogger {
-	if logDir == "" {
-		logDir = "decision_logs"
-	}
+    if logDir == "" {
+        logDir = "decision_logs"
+    }
 
 	// 确保日志目录存在
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		fmt.Printf("⚠ 创建日志目录失败: %v\n", err)
 	}
 
-	return &DecisionLogger{
-		logDir:      logDir,
-		cycleNumber: 0,
-	}
+    l := &DecisionLogger{
+        logDir:      logDir,
+        cycleNumber: 0,
+    }
+
+    // 恢复历史最大周期号：从现有日志文件名中解析 _cycle<number>
+    if files, err := ioutil.ReadDir(logDir); err == nil {
+        maxCycle := 0
+        for _, f := range files {
+            if f.IsDir() {
+                continue
+            }
+            name := f.Name()
+            // 期望格式：decision_YYYYMMDD_HHMMSS_cycleN.json
+            idx := strings.LastIndex(name, "_cycle")
+            if idx == -1 {
+                continue
+            }
+            // 提取从 _cycle 之后到 .json 之前的数字
+            suffix := name[idx+len("_cycle"):]
+            dot := strings.LastIndex(suffix, ".")
+            if dot > 0 {
+                suffix = suffix[:dot]
+            }
+            if n, err := strconv.Atoi(suffix); err == nil {
+                if n > maxCycle {
+                    maxCycle = n
+                }
+            }
+        }
+        l.cycleNumber = maxCycle
+        if maxCycle > 0 {
+            fmt.Printf("🗂️  恢复历史周期计数：从目录 %s 发现最大 cycle=%d\n", logDir, maxCycle)
+        }
+    }
+
+    return l
 }
 
 // LogDecision 记录决策

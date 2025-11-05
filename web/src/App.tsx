@@ -594,7 +594,7 @@ function TraderDetailsPage({
           <div className="space-y-4 overflow-y-auto pr-2" style={{ maxHeight: 'calc(100vh - 280px)' }}>
             {decisions && decisions.length > 0 ? (
               decisions.map((decision, i) => (
-                <DecisionCard key={i} decision={decision} language={language} analysisEnabled={analysisEnabled} />
+<DecisionCard key={i} decision={decision} language={language} />
               ))
             ) : (
               <div className="py-16 text-center">
@@ -602,6 +602,9 @@ function TraderDetailsPage({
                 <div className="text-lg font-semibold mb-2" style={{ color: '#EAECEF' }}>{t('noDecisionsYet', language)}</div>
                 <div className="text-sm" style={{ color: '#848E9C' }}>{t('aiDecisionsWillAppear', language)}</div>
               </div>
+            )}
+            {decisions && decisions.length > 0 && (
+              <PlainSuggestionsFooter latestRecord={decisions[0]} />
             )}
           </div>
         </div>
@@ -650,8 +653,39 @@ function StatCard({
   );
 }
 
+// 纯文本底部建议：仅基于 decision_json 输出“SYMBOL ACTION”行
+function PlainSuggestionsFooter({ latestRecord }: { latestRecord: any }) {
+  const decisionJSON: string = latestRecord?.decision_json || latestRecord?.DecisionJSON || '';
+  let suggestions: any[] = [];
+  try {
+    if (decisionJSON && typeof decisionJSON === 'string') {
+      const parsed = JSON.parse(decisionJSON);
+      if (Array.isArray(parsed)) suggestions = parsed;
+    }
+  } catch (e) {
+    suggestions = [];
+  }
+
+  if (!suggestions || suggestions.length === 0) return null;
+
+  const normalizeAction = (a: any) => {
+    const v = String(a || '').toLowerCase();
+    if (v === 'buy' || v === 'long' || v === 'open_long') return 'BUY';
+    if (v === 'sell' || v === 'short' || v === 'open_short') return 'SELL';
+    return 'HOLD';
+  };
+
+  const line = suggestions
+    .map((s: any) => `${String(s?.symbol || '-').toUpperCase()} ${normalizeAction(s?.action)}`)
+    .join(' · ');
+
+  return (
+    <div className="text-xs mono" style={{ color: '#848E9C' }}>{line}</div>
+  );
+}
+
 // Decision Card Component with CoT Trace - Binance Style
-function DecisionCard({ decision, language, analysisEnabled }: { decision: DecisionRecord; language: Language; analysisEnabled?: boolean }) {
+function DecisionCard({ decision, language }: { decision: DecisionRecord; language: Language }) {
   const [showInputPrompt, setShowInputPrompt] = useState<boolean>(false);
   const [showCoT, setShowCoT] = useState<boolean>(false);
 
@@ -742,15 +776,7 @@ function DecisionCard({ decision, language, analysisEnabled }: { decision: Decis
         </div>
       )}
 
-      {/* Account State Summary */}
-      {decision.account_state && (
-        <div className="flex gap-4 text-xs mb-3 rounded px-3 py-2" style={{ background: '#0B0E11', color: '#848E9C' }}>
-          <span>净值: {decision.account_state.total_balance.toFixed(2)} USDT</span>
-          <span>可用: {decision.account_state.available_balance.toFixed(2)} USDT</span>
-          <span>保证金率: {decision.account_state.margin_used_pct.toFixed(1)}%</span>
-          <span>持仓: {decision.account_state.position_count}</span>
-        </div>
-      )}
+      {/* Account State Summary removed per request */}
 
       {/* Execution Logs */}
       {decision.execution_log && decision.execution_log.length > 0 && (

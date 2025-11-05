@@ -98,6 +98,10 @@ func (s *Server) setupRoutes() {
 
         // AI先决策平仓，再决策开仓
         api.POST("/ai-close-then-open", s.handleAiCloseThenOpen)
+
+        // 手动测试路由：开/平仓
+        api.POST("/manual/open", s.handleManualOpen)
+        api.POST("/manual/close", s.handleManualClose)
     }
 }
 
@@ -215,6 +219,90 @@ func (s *Server) handleAiCloseThenOpen(c *gin.Context) {
         return
     }
     c.JSON(http.StatusOK, gin.H{"result": res})
+}
+
+// handleManualOpen 手动开仓（用于测试）
+// JSON Body: {"trader_id":"...","action":"long|short","symbol":"BTCUSDT","usd":100.0,"leverage":10}
+func (s *Server) handleManualOpen(c *gin.Context) {
+    type Req struct {
+        TraderID string  `json:"trader_id"`
+        Action   string  `json:"action"`
+        Symbol   string  `json:"symbol"`
+        USD      float64 `json:"usd"`
+        Leverage int     `json:"leverage"`
+    }
+    var req Req
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json: " + err.Error()})
+        return
+    }
+    if req.TraderID == "" || req.Symbol == "" || req.Action == "" || req.USD <= 0 || req.Leverage <= 0 {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "缺少必要参数或参数不合法"})
+        return
+    }
+
+    t, err := s.traderManager.GetTrader(req.TraderID)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+
+    var result map[string]interface{}
+    switch req.Action {
+    case "long":
+        result, err = t.ManualOpenLong(req.Symbol, req.USD, req.Leverage)
+    case "short":
+        result, err = t.ManualOpenShort(req.Symbol, req.USD, req.Leverage)
+    default:
+        c.JSON(http.StatusBadRequest, gin.H{"error": "action 必须为 long 或 short"})
+        return
+    }
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"success": true, "order": result})
+}
+
+// handleManualClose 手动平仓（用于测试）
+// JSON Body: {"trader_id":"...","side":"long|short","symbol":"BTCUSDT"}
+func (s *Server) handleManualClose(c *gin.Context) {
+    type Req struct {
+        TraderID string `json:"trader_id"`
+        Side     string `json:"side"`
+        Symbol   string `json:"symbol"`
+    }
+    var req Req
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json: " + err.Error()})
+        return
+    }
+    if req.TraderID == "" || req.Symbol == "" || req.Side == "" {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "缺少必要参数或参数不合法"})
+        return
+    }
+
+    t, err := s.traderManager.GetTrader(req.TraderID)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+
+    var result map[string]interface{}
+    switch req.Side {
+    case "long":
+        result, err = t.ManualCloseLong(req.Symbol)
+    case "short":
+        result, err = t.ManualCloseShort(req.Symbol)
+    default:
+        c.JSON(http.StatusBadRequest, gin.H{"error": "side 必须为 long 或 short"})
+        return
+    }
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+    c.JSON(http.StatusOK, gin.H{"success": true, "order": result})
 }
 
 // handleStatus 系统状态
@@ -661,10 +749,16 @@ func (s *Server) handleOkxFills(c *gin.Context) {
             limit = v
         }
     }
+    // 防御：OKX单次最大返回条数通常不超过100，避免过大limit导致接口报错
+    if limit > 100 {
+        limit = 100
+    }
 
     fills, err := trader.GetOKXFills(limit)
     if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        // 前端期望数组类型，避免500导致前端中断；改为返回空数组并记录错误
+        log.Printf("⚠️ 获取OKX成交记录失败(trader=%s, limit=%d): %v", traderID, limit, err)
+        c.JSON(http.StatusOK, []map[string]interface{}{})
         return
     }
     c.JSON(http.StatusOK, fills)
