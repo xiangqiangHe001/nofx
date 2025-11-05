@@ -22,13 +22,16 @@ type Server struct {
 
 // NewServer 创建API服务器
 func NewServer(traderManager *manager.TraderManager, port int) *Server {
-	// 设置为Release模式（减少日志输出）
-	gin.SetMode(gin.ReleaseMode)
+    // 设置为Release模式（减少日志输出）
+    gin.SetMode(gin.ReleaseMode)
 
-	router := gin.Default()
+    router := gin.Default()
 
-	// 启用CORS
-	router.Use(corsMiddleware())
+    // 启用CORS
+    router.Use(corsMiddleware())
+    // 请求ID与结构化日志
+    router.Use(requestIDMiddleware())
+    router.Use(requestLogger())
 
 	s := &Server{
 		router:        router,
@@ -44,18 +47,55 @@ func NewServer(traderManager *manager.TraderManager, port int) *Server {
 
 // corsMiddleware CORS中间件
 func corsMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    return func(c *gin.Context) {
+        c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+        c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusOK)
 			return
 		}
 
-		c.Next()
-	}
+        c.Next()
+    }
+}
+
+// requestIDMiddleware 为每个请求生成并附加一个请求ID（X-Request-ID）
+func requestIDMiddleware() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        rid := c.GetHeader("X-Request-ID")
+        if rid == "" {
+            // 简单的时间戳+随机数生成（避免引入外部依赖）
+            rid = fmt.Sprintf("%d-%d", time.Now().UnixNano(), time.Now().Unix()%1000)
+            c.Request.Header.Set("X-Request-ID", rid)
+        }
+        c.Writer.Header().Set("X-Request-ID", rid)
+        c.Set("request_id", rid)
+        c.Next()
+    }
+}
+
+// requestLogger 结构化记录每个HTTP请求的关键字段
+func requestLogger() gin.HandlerFunc {
+    return func(c *gin.Context) {
+        start := time.Now()
+        method := c.Request.Method
+        path := c.Request.URL.Path
+        query := c.Request.URL.RawQuery
+        rid, _ := c.Get("request_id")
+
+        // 预先抓取常用上下文（如 trader_id）
+        traderID := c.Query("trader_id")
+
+        c.Next()
+
+        latency := time.Since(start)
+        status := c.Writer.Status()
+
+        log.Printf("http | rid=%v method=%s path=%s status=%d latency=%s trader_id=%s query=%s",
+            rid, method, path, status, latency, traderID, query)
+    }
 }
 
 // setupRoutes 设置路由

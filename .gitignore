@@ -22,6 +22,8 @@ Thumbs.db
 *.tmp
 *.bak
 *.backup
+*.exe~
+*~
 
 # 环境变量
 .env
