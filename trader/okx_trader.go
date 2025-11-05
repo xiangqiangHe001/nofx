@@ -412,7 +412,8 @@ func (o *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
             SMsg  string `json:"sMsg"`
         } `json:"data"`
     }
-    if err := json.Unmarshal(respBody, &resp); err != nil { return nil, fmt.Errorf("解析下单响应失败: %w", err) }
+    err = json.Unmarshal(respBody, &resp)
+    if err != nil { return nil, fmt.Errorf("解析下单响应失败: %w", err) }
     if resp.Code != "0" {
         detail := ""
         if len(resp.Data) > 0 && (resp.Data[0].SCode != "" || resp.Data[0].SMsg != "") {
@@ -431,7 +432,8 @@ func (o *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
             o.posModeCache = ""
             o.posModeCacheTime = time.Time{}
             posMode = o.getPositionMode()
-            if err := o.SetLeverage(symbol, leverage); err != nil {
+            err = o.SetLeverage(symbol, leverage)
+            if err != nil {
                 log.Printf("⚠️ 重试设置杠杆失败(继续尝试下单): %v", err)
             }
             time.Sleep(2500 * time.Millisecond)
@@ -449,7 +451,8 @@ func (o *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
             payloadBytes, _ = json.Marshal(req)
             respBody, err = o.doSignedRequest("POST", "/api/v5/trade/order", string(payloadBytes))
             if err == nil {
-                if err := json.Unmarshal(respBody, &resp); err == nil {
+                err = json.Unmarshal(respBody, &resp)
+                if err == nil {
                     if resp.Code == "0" && len(resp.Data) > 0 && resp.Data[0].OrdID != "" {
                         return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
                     }
@@ -465,7 +468,8 @@ func (o *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
             o.posModeCache = ""
             o.posModeCacheTime = time.Time{}
             posMode = o.getPositionMode()
-            if err := o.SetLeverage(symbol, leverage); err != nil {
+            err = o.SetLeverage(symbol, leverage)
+            if err != nil {
                 log.Printf("⚠️ 重试设置杠杆失败(继续尝试下单): %v", err)
             }
             time.Sleep(2500 * time.Millisecond)

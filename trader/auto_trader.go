@@ -193,30 +193,30 @@ case "binance":
 
 // Run 运行自动交易主循环
 func (at *AutoTrader) Run() error {
-	at.isRunning = true
-	log.Println("🚀 AI驱动自动交易系统启动")
-	log.Printf("💰 初始余额: %.2f USDT", at.initialBalance)
-	log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
-	log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
+    at.isRunning = true
+    log.Println("🚀 AI驱动自动交易系统启动")
+    log.Printf("💰 初始余额: %.2f USDT", at.initialBalance)
+    log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
+    log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
 
-	ticker := time.NewTicker(at.config.ScanInterval)
-	defer ticker.Stop()
+    ticker := time.NewTicker(at.config.ScanInterval)
+    defer ticker.Stop()
 
-	// 首次立即执行
-	if err := at.runCycle(); err != nil {
-		log.Printf("❌ 执行失败: %v", err)
-	}
+    // 首次立即执行
+    err := at.runCycle()
+    if err != nil {
+        log.Printf("❌ 执行失败: %v", err)
+    }
 
-	for at.isRunning {
-		select {
-		case <-ticker.C:
-			if err := at.runCycle(); err != nil {
-				log.Printf("❌ 执行失败: %v", err)
-			}
-		}
-	}
+    for at.isRunning {
+        <-ticker.C
+        err = at.runCycle()
+        if err != nil {
+            log.Printf("❌ 执行失败: %v", err)
+        }
+    }
 
-	return nil
+    return nil
 }
 
 // Stop 停止自动交易
@@ -240,14 +240,14 @@ func (at *AutoTrader) runCycle() error {
 	}
 
 	// 1. 检查是否需要停止交易
-	if time.Now().Before(at.stopUntil) {
-		remaining := at.stopUntil.Sub(time.Now())
-		log.Printf("⏸ 风险控制：暂停交易中，剩余 %.0f 分钟", remaining.Minutes())
-		record.Success = false
-		record.ErrorMessage = fmt.Sprintf("风险控制暂停中，剩余 %.0f 分钟", remaining.Minutes())
-		at.decisionLogger.LogDecision(record)
-		return nil
-	}
+    if time.Now().Before(at.stopUntil) {
+        remaining := time.Until(at.stopUntil)
+        log.Printf("⏸ 风险控制：暂停交易中，剩余 %.0f 分钟", remaining.Minutes())
+        record.Success = false
+        record.ErrorMessage = fmt.Sprintf("风险控制暂停中，剩余 %.0f 分钟", remaining.Minutes())
+        at.decisionLogger.LogDecision(record)
+        return nil
+    }
 
 	// 2. 重置日盈亏（每天重置）
 	if time.Since(at.lastResetTime) > 24*time.Hour {
