@@ -8,10 +8,10 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           // 基础代码分割：React 相关、图表库、通用第三方依赖
-          if (id.includes('node_modules')) {
-            if (id.includes('react')) return 'react-vendor'
-            if (id.includes('recharts')) return 'chart-vendor'
-            if (id.includes('zustand') || id.includes('swr') || id.includes('date-fns')) return 'data-vendor'
+          if (id.indexOf('node_modules') !== -1) {
+            if (id.indexOf('react') !== -1) return 'react-vendor'
+            if (id.indexOf('recharts') !== -1) return 'chart-vendor'
+            if (id.indexOf('zustand') !== -1 || id.indexOf('swr') !== -1 || id.indexOf('date-fns') !== -1) return 'data-vendor'
             return 'vendor'
           }
         },
