@@ -183,4 +183,18 @@ export const api = {
     if (!res.ok) throw new Error('获取 OKX 成交记录失败');
     return res.json();
   },
+
+  // 获取平仓明细日志（后端已提供过滤路由）
+  async getCloseLogs(traderId?: string, limit?: number): Promise<any[]> {
+    const params = new URLSearchParams();
+    if (traderId) params.set('trader_id', traderId);
+    if (limit && limit > 0) params.set('limit', String(limit));
+    const query = params.toString();
+    const url = query
+      ? `${API_BASE}/close-logs?${query}`
+      : `${API_BASE}/close-logs`;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw new Error('获取平仓明细日志失败');
+    return res.json();
+  },
 };

@@ -4,6 +4,8 @@ import { api } from './lib/api';
 import { EquityChart } from './components/EquityChart';
 import { CompetitionPage } from './components/CompetitionPage';
 import AILearning from './components/AILearning';
+import FillsPage from './components/FillsPage';
+import CloseLogsPage from './components/CloseLogsPage';
 import { LanguageProvider, useLanguage } from './contexts/LanguageContext';
 import { t, type Language } from './i18n/translations';
 import type {
@@ -15,7 +17,7 @@ import type {
   TraderInfo,
 } from './types';
 
-type Page = 'competition' | 'trader';
+type Page = 'competition' | 'trader' | 'fills' | 'closeLogs';
 
 function App() {
   const { language, setLanguage } = useLanguage();
@@ -23,7 +25,10 @@ function App() {
   // 从URL hash读取初始页面状态（支持刷新保持页面）
   const getInitialPage = (): Page => {
     const hash = window.location.hash.slice(1); // 去掉 #
-    return hash === 'trader' || hash === 'details' ? 'trader' : 'competition';
+    if (hash === 'trader' || hash === 'details') return 'trader';
+    if (hash === 'fills') return 'fills';
+    if (hash === 'closeLogs') return 'closeLogs';
+    return 'competition';
   };
 
   const [currentPage, setCurrentPage] = useState<Page>(getInitialPage());
@@ -36,6 +41,10 @@ function App() {
       const hash = window.location.hash.slice(1);
       if (hash === 'trader' || hash === 'details') {
         setCurrentPage('trader');
+      } else if (hash === 'fills') {
+        setCurrentPage('fills');
+      } else if (hash === 'closeLogs') {
+        setCurrentPage('closeLogs');
       } else if (hash === 'competition' || hash === '') {
         setCurrentPage('competition');
       }
@@ -48,7 +57,11 @@ function App() {
   // 切换页面时更新URL hash
   const navigateToPage = (page: Page) => {
     setCurrentPage(page);
-    window.location.hash = page === 'competition' ? '' : 'trader';
+    if (page === 'competition') {
+      window.location.hash = '';
+    } else {
+      window.location.hash = page;
+    }
   };
 
   // 获取trader列表
@@ -240,10 +253,30 @@ function App() {
                 >
                   {t('details', language)}
                 </button>
+              <button
+                onClick={() => navigateToPage('fills')}
+                className="px-2 sm:px-4 py-1.5 sm:py-2 rounded text-xs sm:text-sm font-semibold transition-all"
+                style={currentPage === 'fills'
+                  ? { background: '#F0B90B', color: '#000' }
+                  : { background: 'transparent', color: '#848E9C' }
+                }
+              >
+                {t('tradeHistory', language)}
+              </button>
+              <button
+                onClick={() => navigateToPage('closeLogs')}
+                className="px-2 sm:px-4 py-1.5 sm:py-2 rounded text-xs sm:text-sm font-semibold transition-all"
+                style={currentPage === 'closeLogs'
+                  ? { background: '#F0B90B', color: '#000' }
+                  : { background: 'transparent', color: '#848E9C' }
+                }
+              >
+                平仓明细
+              </button>
               </div>
 
               {/* Trader Selector (only show on trader page) */}
-              {currentPage === 'trader' && traders && traders.length > 0 && (
+              {(currentPage === 'trader' || currentPage === 'fills' || currentPage === 'closeLogs') && traders && traders.length > 0 && (
                 <select
                   value={selectedTraderId}
                   onChange={(e) => setSelectedTraderId(e.target.value)}
@@ -285,6 +318,10 @@ function App() {
       <main className="max-w-[1920px] mx-auto px-6 py-6">
         {currentPage === 'competition' ? (
           <CompetitionPage />
+        ) : currentPage === 'fills' ? (
+          <FillsPage traderId={selectedTraderId} />
+        ) : currentPage === 'closeLogs' ? (
+          <CloseLogsPage traderId={selectedTraderId} />
         ) : (
           <TraderDetailsPage
             selectedTrader={selectedTrader}

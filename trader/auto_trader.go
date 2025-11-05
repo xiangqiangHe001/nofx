@@ -1146,7 +1146,8 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
         return []map[string]interface{}{}, nil
     }
 
-	var result []map[string]interface{}
+    // 保证空列表返回 [] 而非 null
+    result := make([]map[string]interface{}, 0)
 	for _, pos := range positions {
 		symbol := pos["symbol"].(string)
 		side := pos["side"].(string)

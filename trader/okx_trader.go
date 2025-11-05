@@ -161,7 +161,8 @@ func (o *OKXTrader) GetPositions() ([]map[string]interface{}, error) {
         return nil, fmt.Errorf("OKX positions API error: code=%s msg=%s", payload.Code, payload.Msg)
     }
 
-    var result []map[string]interface{}
+    // 返回空数组而不是 null，以便前端一致处理
+    result := make([]map[string]interface{}, 0)
     for _, p := range payload.Data {
         qtyContracts := parseFloat(p.Pos)
         if qtyContracts == 0 {
@@ -383,14 +384,30 @@ func (o *OKXTrader) CloseLong(symbol string, quantity float64) (map[string]inter
         }
         contracts = c
     }
+    // 对合约张数按最小步长取整，避免因数量精度导致下单失败
     if contracts <= 0 { return nil, fmt.Errorf("下单数量过小") }
-    sz := fmt.Sprintf("%.3f", contracts)
+    if ct, lot, min, exists := o.getInstrumentSpec(instID); exists {
+        if ct <= 0 { ct = 1.0 }
+        if lot > 0 {
+            steps := math.Floor(contracts/lot)
+            contracts = steps * lot
+        }
+        if contracts < min || contracts <= 0 {
+            return nil, fmt.Errorf("下单数量过小，最小张数为 %.6f", min)
+        }
+    }
+    sz := fmt.Sprintf("%.6f", contracts)
 
     // 使用结构体生成 JSON，保证字段类型正确（reduceOnly 为布尔）
     posMode := o.getPositionMode()
+    // 检测该持仓的保证金模式（isolated/cross），避免模式不匹配导致失败
+    mgnMode := o.getPositionMarginMode(instID, "long")
+    if mgnMode == "" { mgnMode = "isolated" }
+    // 观测性日志：记录将要平仓的关键参数
+    log.Printf("[OKX CloseLong] instID=%s posMode=%s mgnMode=%s contracts=%.6f", instID, posMode, mgnMode, contracts)
     req := map[string]interface{}{
         "instId":     instID,
-        "tdMode":     "isolated",
+        "tdMode":     mgnMode,
         "side":       "sell",
         "ordType":    "market",
         "sz":         sz,
@@ -429,6 +446,9 @@ func (o *OKXTrader) CloseLong(symbol string, quantity float64) (map[string]inter
     if len(resp.Data) > 0 && resp.Data[0].SCode != "" && resp.Data[0].SCode != "0" {
         return nil, fmt.Errorf("OKX平仓失败: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
     }
+    // 成功后清除持仓缓存，确保后续查询实时刷新
+    o.cachedPositions = nil
+    o.positionsCacheTime = time.Time{}
     return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
 }
 
@@ -449,14 +469,30 @@ func (o *OKXTrader) CloseShort(symbol string, quantity float64) (map[string]inte
         }
         contracts = c
     }
+    // 对合约张数按最小步长取整，避免因数量精度导致下单失败
     if contracts <= 0 { return nil, fmt.Errorf("下单数量过小") }
-    sz := fmt.Sprintf("%.3f", contracts)
+    if ct, lot, min, exists := o.getInstrumentSpec(instID); exists {
+        if ct <= 0 { ct = 1.0 }
+        if lot > 0 {
+            steps := math.Floor(contracts/lot)
+            contracts = steps * lot
+        }
+        if contracts < min || contracts <= 0 {
+            return nil, fmt.Errorf("下单数量过小，最小张数为 %.6f", min)
+        }
+    }
+    sz := fmt.Sprintf("%.6f", contracts)
 
     // 使用结构体生成 JSON，保证字段类型正确（reduceOnly 为布尔）
     posMode := o.getPositionMode()
+    // 检测该持仓的保证金模式（isolated/cross），与开仓保持一致
+    mgnMode := o.getPositionMarginMode(instID, "short")
+    if mgnMode == "" { mgnMode = "isolated" }
+    // 观测性日志：记录将要平仓的关键参数
+    log.Printf("[OKX CloseShort] instID=%s posMode=%s mgnMode=%s contracts=%.6f", instID, posMode, mgnMode, contracts)
     req := map[string]interface{}{
         "instId":     instID,
-        "tdMode":     "isolated",
+        "tdMode":     mgnMode,
         "side":       "buy",
         "ordType":    "market",
         "sz":         sz,
@@ -495,6 +531,9 @@ func (o *OKXTrader) CloseShort(symbol string, quantity float64) (map[string]inte
     if len(resp.Data) > 0 && resp.Data[0].SCode != "" && resp.Data[0].SCode != "0" {
         return nil, fmt.Errorf("OKX平仓失败: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
     }
+    // 成功后清除持仓缓存，确保后续查询实时刷新
+    o.cachedPositions = nil
+    o.positionsCacheTime = time.Time{}
     return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
 }
 
@@ -586,8 +625,8 @@ func (o *OKXTrader) getPositionContracts(instID string, posSide string) (float64
         if p.InstID != instID {
             continue
         }
-        // 双向持仓模式优先匹配 posSide；净持仓模式下 posSide 可能为空，使用张数符号判断方向
-        if strings.EqualFold(p.PosSide, posSide) || p.PosSide == "" {
+        // 双向持仓模式：posSide 为 long/short，直接按方向匹配
+        if strings.EqualFold(p.PosSide, posSide) {
             contracts := parseFloat(p.Pos)
             if contracts < 0 {
                 contracts = -contracts
@@ -595,6 +634,18 @@ func (o *OKXTrader) getPositionContracts(instID string, posSide string) (float64
             if contracts > 0 {
                 return contracts, nil
             }
+            continue
+        }
+        // 净持仓模式：posSide 可能为 "net" 或空，使用张数符号判断方向
+        if p.PosSide == "net" || p.PosSide == "" {
+            contracts := parseFloat(p.Pos)
+            if strings.EqualFold(posSide, "short") && contracts < 0 {
+                return -contracts, nil
+            }
+            if strings.EqualFold(posSide, "long") && contracts > 0 {
+                return contracts, nil
+            }
+            // 方向不匹配则继续查找
         }
     }
     return 0, fmt.Errorf("no %s position for %s", posSide, instID)
@@ -886,5 +937,44 @@ func (o *OKXTrader) getPositionMode() string {
     }
 
     // 仍失败时返回空字符串
+    return ""
+}
+
+// getPositionMarginMode 查询指定合约与方向的保证金模式（返回 "isolated" 或 "cross"，未知返回空字符串）
+func (o *OKXTrader) getPositionMarginMode(instID string, posSide string) string {
+    path := fmt.Sprintf("/api/v5/account/positions?instId=%s", instID)
+    respBody, err := o.doSignedRequest("GET", path, "")
+    if err != nil {
+        return ""
+    }
+    var payload struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            InstID  string `json:"instId"`
+            PosSide string `json:"posSide"`
+            MgnMode string `json:"mgnMode"`
+        } `json:"data"`
+    }
+    if err := json.Unmarshal(respBody, &payload); err != nil {
+        return ""
+    }
+    if payload.Code != "0" {
+        return ""
+    }
+    for _, p := range payload.Data {
+        if p.InstID != instID {
+            continue
+        }
+        // 双向持仓模式优先匹配 posSide；净持仓模式下 posSide 可能为空，允许匹配空
+        if strings.EqualFold(p.PosSide, posSide) || p.PosSide == "" {
+            if strings.EqualFold(p.MgnMode, "isolated") {
+                return "isolated"
+            }
+            if strings.EqualFold(p.MgnMode, "cross") {
+                return "cross"
+            }
+        }
+    }
     return ""
 }

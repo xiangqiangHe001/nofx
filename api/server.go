@@ -76,8 +76,10 @@ func (s *Server) setupRoutes() {
 		api.GET("/status", s.handleStatus)
 		api.GET("/account", s.handleAccount)
 		api.GET("/positions", s.handlePositions)
-		api.GET("/decisions", s.handleDecisions)
-		api.GET("/decisions/latest", s.handleLatestDecisions)
+        api.GET("/decisions", s.handleDecisions)
+        api.GET("/decisions/latest", s.handleLatestDecisions)
+        // 平仓明细日志（过滤 close_* 动作）
+        api.GET("/close-logs", s.handleCloseLogs)
 		api.GET("/statistics", s.handleStatistics)
 		api.GET("/equity-history", s.handleEquityHistory)
         api.GET("/performance", s.handlePerformance)
@@ -739,4 +741,67 @@ func (s *Server) Start() error {
     log.Println()
 
     return s.router.Run(addr)
+}
+// handleCloseLogs 返回平仓明细日志（按时间倒序）
+func (s *Server) handleCloseLogs(c *gin.Context) {
+    _, traderID, err := s.getTraderFromQuery(c)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+
+    trader, err := s.traderManager.GetTrader(traderID)
+    if err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+        return
+    }
+
+    // 获取最近的决策记录，足够多以覆盖平仓动作
+    records, err := trader.GetDecisionLogger().GetLatestRecords(1000)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取决策日志失败: %v", err)})
+        return
+    }
+
+    type CloseLog struct {
+        Action    string    `json:"action"`
+        Symbol    string    `json:"symbol"`
+        Quantity  float64   `json:"quantity"`
+        Price     float64   `json:"price"`
+        OrderID   int64     `json:"order_id"`
+        Timestamp time.Time `json:"timestamp"`
+        Success   bool      `json:"success"`
+        Error     string    `json:"error"`
+    }
+
+    logs := make([]CloseLog, 0)
+    for _, r := range records {
+        for _, a := range r.Decisions {
+            if a.Action == "close_long" || a.Action == "close_short" {
+                logs = append(logs, CloseLog{
+                    Action:    a.Action,
+                    Symbol:    a.Symbol,
+                    Quantity:  a.Quantity,
+                    Price:     a.Price,
+                    OrderID:   a.OrderID,
+                    Timestamp: a.Timestamp,
+                    Success:   a.Success,
+                    Error:     a.Error,
+                })
+            }
+        }
+    }
+
+    // 时间倒序
+    sort.Slice(logs, func(i, j int) bool { return logs[i].Timestamp.After(logs[j].Timestamp) })
+
+    // 支持 limit 参数
+    limit := len(logs)
+    if ls := c.Query("limit"); ls != "" {
+        if v, e := strconv.Atoi(ls); e == nil && v > 0 && v < limit {
+            limit = v
+        }
+    }
+
+    c.JSON(http.StatusOK, logs[:limit])
 }

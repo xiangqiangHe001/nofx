@@ -72,10 +72,32 @@ export default function AILearning({ traderId }: AILearningProps) {
     }
   );
 
+  // 当 AI 学习接口报错时，回退到最近决策以抑制错误提示并提供参考数据
+  const { data: latestDecisions } = useSWR<any[]>(
+    error && traderId ? `ai-learning-decisions-fallback-${traderId}` : null,
+    () => api.getLatestDecisions(traderId),
+    {
+      refreshInterval: 30000,
+      revalidateOnFocus: false,
+      dedupingInterval: 20000,
+    }
+  );
+
   if (error) {
     return (
       <div className="rounded p-6" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
-        <div style={{ color: '#F6465D' }}>{t('loadingError', language)}</div>
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-xl">🧠</span>
+          <h2 className="text-lg font-bold" style={{ color: '#EAECEF' }}>{t('aiLearning', language)}</h2>
+        </div>
+        <div className="text-sm mb-1" style={{ color: '#F0B90B' }}>
+          统计数据暂不可用，已回退到最近决策/成交数据以供参考。
+        </div>
+        {latestDecisions && latestDecisions.length > 0 && (
+          <div className="mt-2 text-xs" style={{ color: '#94A3B8' }}>
+            ✅ 最近决策：{latestDecisions.length} 条（用于回退展示）
+          </div>
+        )}
       </div>
     );
   }
@@ -101,6 +123,11 @@ export default function AILearning({ traderId }: AILearningProps) {
         {fills && (
           <div className="mt-2 text-xs" style={{ color: '#94A3B8' }}>
             ✅ 已获取成交记录：{fills.length} 条（来自 OKX）
+          </div>
+        )}
+        {!fills && latestDecisions && (
+          <div className="mt-2 text-xs" style={{ color: '#94A3B8' }}>
+            ✅ 已获取最近决策：{latestDecisions.length} 条（回退）
           </div>
         )}
       </div>
@@ -142,6 +169,21 @@ export default function AILearning({ traderId }: AILearningProps) {
             <p className="text-sm" style={{ color: '#A78BFA' }}>
               {t('tradesAnalyzed', language, { count: performance.total_trades })}
             </p>
+          </div>
+        </div>
+      </div>
+
+      {/* 核心指标卡片 - 4列网格 */}
+      {/* 历史周期计数（优先使用完整绩效数据，其次使用回退决策/成交） */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-2">
+        <div className="p-2 rounded transition-all hover:bg-opacity-50" style={{ background: 'rgba(240, 185, 11, 0.05)' }}>
+          <div className="text-xs mb-1 uppercase tracking-wider" style={{ color: '#848E9C' }}>历史周期</div>
+          <div className="text-xs sm:text-sm font-bold mono" style={{ color: '#EAECEF' }}>
+            {performance?.total_trades && performance.total_trades > 0
+              ? `${performance.total_trades} 个`
+              : ((latestDecisions && latestDecisions.length > 0)
+                  ? `${latestDecisions.length} 个（回退）`
+                  : '—')}
           </div>
         </div>
       </div>
