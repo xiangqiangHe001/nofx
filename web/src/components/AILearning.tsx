@@ -72,9 +72,11 @@ export default function AILearning({ traderId }: AILearningProps) {
     }
   );
 
-  // 当 AI 学习接口报错时，回退到最近决策以抑制错误提示并提供参考数据
+  // 当 AI 学习统计为 0 或接口报错时，回退到最近决策以抑制错误提示并提供参考数据
   const { data: latestDecisions } = useSWR<any[]>(
-    error && traderId ? `ai-learning-decisions-fallback-${traderId}` : null,
+    ((performance && performance.total_trades === 0) || error) && traderId
+      ? `ai-learning-decisions-fallback-${traderId}`
+      : null,
     () => api.getLatestDecisions(traderId),
     {
       refreshInterval: 30000,
@@ -112,7 +114,7 @@ export default function AILearning({ traderId }: AILearningProps) {
 
   if (!performance || performance.total_trades === 0) {
     return (
-      <div className="rounded p-6" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
+      <div className="rounded p-6 space-y-3" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
         <div className="flex items-center gap-2 mb-2">
           <span className="text-xl">🧠</span>
           <h2 className="text-lg font-bold" style={{ color: '#EAECEF' }}>{t('aiLearning', language)}</h2>
@@ -121,13 +123,73 @@ export default function AILearning({ traderId }: AILearningProps) {
           {t('noCompleteData', language)}
         </div>
         {fills && (
-          <div className="mt-2 text-xs" style={{ color: '#94A3B8' }}>
-            ✅ 已获取成交记录：{fills.length} 条（来自 OKX）
+          <div>
+            <div className="mt-2 text-xs" style={{ color: '#94A3B8' }}>
+              ✅ 已获取成交记录：{fills.length} 条（来自 OKX）
+            </div>
+            {/* 简版成交记录列表 */}
+            <div className="mt-3 rounded border" style={{ borderColor: 'rgba(240, 185, 11, 0.3)' }}>
+              <div className="p-2 text-xs font-bold" style={{ color: '#FCD34D', background: 'rgba(240,185,11,0.1)' }}>OKX 成交记录（回退展示）</div>
+              <div className="max-h-64 overflow-y-auto divide-y" style={{ borderColor: 'rgba(240, 185, 11, 0.2)' }}>
+                {(fills || []).slice(0, 10).map((f: any, idx: number) => (
+                  <div key={idx} className="p-2 flex items-center justify-between" style={{ borderColor: 'rgba(240, 185, 11, 0.1)' }}>
+                    <div className="text-xs" style={{ color: '#CBD5E1' }}>
+                      <span className="font-mono font-bold" style={{ color: '#E0E7FF' }}>{f?.instId || f?.symbol || '-'}</span>
+                      <span className="ml-2 px-2 py-0.5 rounded" style={{ background: 'rgba(240,185,11,0.15)', color: '#FCD34D' }}>{(f?.side || f?.S) ? String(f?.side || f?.S).toUpperCase() : '-'}</span>
+                    </div>
+                    <div className="text-right text-xs">
+                      <div className="font-mono" style={{ color: '#CBD5E1' }}>{f?.fillPx || f?.price || '-'}</div>
+                      <div className="font-mono" style={{ color: '#94A3B8' }}>{f?.fillSz || f?.size || '-'}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         )}
         {!fills && latestDecisions && (
-          <div className="mt-2 text-xs" style={{ color: '#94A3B8' }}>
-            ✅ 已获取最近决策：{latestDecisions.length} 条（回退）
+          <div>
+            <div className="mt-2 text-xs" style={{ color: '#94A3B8' }}>
+              ✅ 已获取最近决策：{latestDecisions.length} 条（回退）
+            </div>
+            {/* 简版最近决策列表 */}
+            <div className="mt-3 rounded border" style={{ borderColor: 'rgba(99, 102, 241, 0.3)' }}>
+              <div className="p-2 text-xs font-bold" style={{ color: '#A5B4FC', background: 'rgba(99,102,241,0.1)' }}>最近决策（回退展示）</div>
+              <div className="max-h-64 overflow-y-auto divide-y" style={{ borderColor: 'rgba(99, 102, 241, 0.2)' }}>
+                {(latestDecisions || []).slice(0, 5).map((rec: any, idx: number) => {
+                  const actions = rec?.decisions || rec?.Decisions || [];
+                  return (
+                    <div key={idx} className="p-2" style={{ borderColor: 'rgba(99, 102, 241, 0.1)' }}>
+                      <div className="flex items-center justify-between text-xs mb-1">
+                        <div style={{ color: '#CBD5E1' }}>周期 #{rec?.cycle_number ?? rec?.CycleNumber ?? idx + 1}</div>
+                        <div className="font-mono" style={{ color: '#94A3B8' }}>{rec?.timestamp ? new Date(rec.timestamp).toLocaleString() : '-'}</div>
+                      </div>
+                      {actions.length > 0 ? (
+                        <div className="grid grid-cols-1 gap-1">
+                          {actions.slice(0, 4).map((a: any, j: number) => (
+                            <div key={j} className="flex items-center justify-between text-xs rounded p-1" style={{ background: 'rgba(30,35,41,0.4)', border: '1px solid rgba(71,85,105,0.3)' }}>
+                              <div>
+                                <span className="font-mono font-bold" style={{ color: '#E0E7FF' }}>{a?.symbol || '-'}</span>
+                                <span className="ml-2 px-2 py-0.5 rounded font-semibold" style={{ background: 'rgba(14,203,129,0.2)', color: '#10B981' }}>{String(a?.action || '-').toUpperCase()}</span>
+                              </div>
+                              <div className="text-right font-mono" style={{ color: '#CBD5E1' }}>
+                                <span>{a?.quantity ?? '-'}</span>
+                                <span className="ml-2">@ {a?.price ?? '-'}</span>
+                                {a?.success === false && (
+                                  <span className="ml-2 px-2 py-0.5 rounded" style={{ background: 'rgba(248,113,113,0.2)', color: '#FCA5A5' }}>模拟/未执行</span>
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="text-xs" style={{ color: '#94A3B8' }}>无动作记录</div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         )}
       </div>

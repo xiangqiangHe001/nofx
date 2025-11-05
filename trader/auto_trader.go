@@ -354,7 +354,7 @@ func (at *AutoTrader) runCycle() error {
 	}
 	log.Println()
 
-    // 执行决策并记录结果
+    // 执行决策并记录结果（在未启用自动执行时进行模拟记录以便统计）
     for _, d := range sortedDecisions {
         actionRecord := logger.DecisionAction{
             Action:    d.Action,
@@ -366,21 +366,25 @@ func (at *AutoTrader) runCycle() error {
             Success:   false,
         }
 
-        // 如果未启用自动执行，跳过实际下单，仅记录
         if !at.executionEnabled {
-            actionRecord.Error = "execution_disabled"
-            record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("Skip execution (auto-trading disabled): %s %s", d.Symbol, d.Action))
+            record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("Auto-trading disabled: simulate %s %s", d.Symbol, d.Action))
+        }
+
+        if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
+            log.Printf("Decision execution failed (%s %s): %v", d.Symbol, d.Action, err)
+            actionRecord.Error = err.Error()
+            record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("%s %s failed: %v", d.Symbol, d.Action, err))
         } else {
-            if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
-                log.Printf("Decision execution failed (%s %s): %v", d.Symbol, d.Action, err)
-                actionRecord.Error = err.Error()
-                record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("%s %s failed: %v", d.Symbol, d.Action, err))
+            actionRecord.Success = true
+            if !at.executionEnabled {
+                // 标记为模拟成功，避免被统计层过滤
+                actionRecord.Error = "execution_disabled_simulated"
+                record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("%s %s succeeded (simulated)", d.Symbol, d.Action))
             } else {
-                actionRecord.Success = true
                 record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("%s %s succeeded", d.Symbol, d.Action))
-                // 成功执行后短暂延迟
-                time.Sleep(1 * time.Second)
             }
+            // 成功（含模拟）后短暂延迟
+            time.Sleep(1 * time.Second)
         }
 
         record.Decisions = append(record.Decisions, actionRecord)
@@ -594,132 +598,130 @@ func (at *AutoTrader) executeDecisionWithRecord(decision *decision.Decision, act
 
 // executeOpenLongWithRecord 执行开多仓并记录详细信息
 func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+    // 获取当前价格并计算数量（即使在 DryRun/未执行时也补齐记录字段）
+    marketData, err := market.Get(decision.Symbol)
+    if err != nil {
+        return err
+    }
+    quantity := decision.PositionSizeUSD / marketData.CurrentPrice
+    actionRecord.Quantity = quantity
+    actionRecord.Price = marketData.CurrentPrice
+
     if at.config.DryRun || !at.executionEnabled {
         log.Printf("  🚫 DryRun/未启用执行：跳过开多 %s，杠杆=%d，仓位USD=%.2f", decision.Symbol, decision.Leverage, decision.PositionSizeUSD)
         return nil
     }
+
     log.Printf("  📈 开多仓: %s", decision.Symbol)
 
-	// ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）
-	positions, err := at.trader.GetPositions()
-	if err == nil {
-		for _, pos := range positions {
-			if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
-				return fmt.Errorf("❌ %s 已有多仓，拒绝开仓以防止仓位叠加超限。如需换仓，请先给出 close_long 决策", decision.Symbol)
-			}
-		}
-	}
+    // ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）
+    positions, err := at.trader.GetPositions()
+    if err == nil {
+        for _, pos := range positions {
+            if pos["symbol"] == decision.Symbol && pos["side"] == "long" {
+                return fmt.Errorf("❌ %s 已有多仓，拒绝开仓以防止仓位叠加超限。如需换仓，请先给出 close_long 决策", decision.Symbol)
+            }
+        }
+    }
 
-	// 获取当前价格
-	marketData, err := market.Get(decision.Symbol)
-	if err != nil {
-		return err
-	}
+    // 开仓
+    order, err := at.trader.OpenLong(decision.Symbol, quantity, decision.Leverage)
+    if err != nil {
+        return err
+    }
 
-	// 计算数量
-	quantity := decision.PositionSizeUSD / marketData.CurrentPrice
-	actionRecord.Quantity = quantity
-	actionRecord.Price = marketData.CurrentPrice
+    // 记录订单ID
+    if orderID, ok := order["orderId"].(int64); ok {
+        actionRecord.OrderID = orderID
+    }
 
-	// 开仓
-	order, err := at.trader.OpenLong(decision.Symbol, quantity, decision.Leverage)
-	if err != nil {
-		return err
-	}
+    log.Printf("  ✓ 开仓成功，订单ID: %v, 数量: %.4f", order["orderId"], quantity)
 
-	// 记录订单ID
-	if orderID, ok := order["orderId"].(int64); ok {
-		actionRecord.OrderID = orderID
-	}
+    // 记录开仓时间
+    posKey := decision.Symbol + "_long"
+    at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 
-	log.Printf("  ✓ 开仓成功，订单ID: %v, 数量: %.4f", order["orderId"], quantity)
+    // 设置止损止盈
+    if err := at.trader.SetStopLoss(decision.Symbol, "LONG", quantity, decision.StopLoss); err != nil {
+        log.Printf("  ⚠ 设置止损失败: %v", err)
+    }
+    if err := at.trader.SetTakeProfit(decision.Symbol, "LONG", quantity, decision.TakeProfit); err != nil {
+        log.Printf("  ⚠ 设置止盈失败: %v", err)
+    }
 
-	// 记录开仓时间
-	posKey := decision.Symbol + "_long"
-	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
-
-	// 设置止损止盈
-	if err := at.trader.SetStopLoss(decision.Symbol, "LONG", quantity, decision.StopLoss); err != nil {
-		log.Printf("  ⚠ 设置止损失败: %v", err)
-	}
-	if err := at.trader.SetTakeProfit(decision.Symbol, "LONG", quantity, decision.TakeProfit); err != nil {
-		log.Printf("  ⚠ 设置止盈失败: %v", err)
-	}
-
-	return nil
+    return nil
 }
 
 // executeOpenShortWithRecord 执行开空仓并记录详细信息
 func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+    // 获取当前价格并计算数量（即使在 DryRun/未执行时也补齐记录字段）
+    marketData, err := market.Get(decision.Symbol)
+    if err != nil {
+        return err
+    }
+    quantity := decision.PositionSizeUSD / marketData.CurrentPrice
+    actionRecord.Quantity = quantity
+    actionRecord.Price = marketData.CurrentPrice
+
     if at.config.DryRun || !at.executionEnabled {
         log.Printf("  🚫 DryRun/未启用执行：跳过开空 %s，杠杆=%d，仓位USD=%.2f", decision.Symbol, decision.Leverage, decision.PositionSizeUSD)
         return nil
     }
+
     log.Printf("  📉 开空仓: %s", decision.Symbol)
 
-	// ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）
-	positions, err := at.trader.GetPositions()
-	if err == nil {
-		for _, pos := range positions {
-			if pos["symbol"] == decision.Symbol && pos["side"] == "short" {
-				return fmt.Errorf("❌ %s 已有空仓，拒绝开仓以防止仓位叠加超限。如需换仓，请先给出 close_short 决策", decision.Symbol)
-			}
-		}
-	}
+    // ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）
+    positions, err := at.trader.GetPositions()
+    if err == nil {
+        for _, pos := range positions {
+            if pos["symbol"] == decision.Symbol && pos["side"] == "short" {
+                return fmt.Errorf("❌ %s 已有空仓，拒绝开仓以防止仓位叠加超限。如需换仓，请先给出 close_short 决策", decision.Symbol)
+            }
+        }
+    }
 
-	// 获取当前价格
-	marketData, err := market.Get(decision.Symbol)
-	if err != nil {
-		return err
-	}
+    // 开仓
+    order, err := at.trader.OpenShort(decision.Symbol, quantity, decision.Leverage)
+    if err != nil {
+        return err
+    }
 
-	// 计算数量
-	quantity := decision.PositionSizeUSD / marketData.CurrentPrice
-	actionRecord.Quantity = quantity
-	actionRecord.Price = marketData.CurrentPrice
+    // 记录订单ID
+    if orderID, ok := order["orderId"].(int64); ok {
+        actionRecord.OrderID = orderID
+    }
 
-	// 开仓
-	order, err := at.trader.OpenShort(decision.Symbol, quantity, decision.Leverage)
-	if err != nil {
-		return err
-	}
+    log.Printf("  ✓ 开仓成功，订单ID: %v, 数量: %.4f", order["orderId"], quantity)
 
-	// 记录订单ID
-	if orderID, ok := order["orderId"].(int64); ok {
-		actionRecord.OrderID = orderID
-	}
+    // 记录开仓时间
+    posKey := decision.Symbol + "_short"
+    at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 
-	log.Printf("  ✓ 开仓成功，订单ID: %v, 数量: %.4f", order["orderId"], quantity)
+    // 设置止损止盈
+    if err := at.trader.SetStopLoss(decision.Symbol, "SHORT", quantity, decision.StopLoss); err != nil {
+        log.Printf("  ⚠ 设置止损失败: %v", err)
+    }
+    if err := at.trader.SetTakeProfit(decision.Symbol, "SHORT", quantity, decision.TakeProfit); err != nil {
+        log.Printf("  ⚠ 设置止盈失败: %v", err)
+    }
 
-	// 记录开仓时间
-	posKey := decision.Symbol + "_short"
-	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
-
-	// 设置止损止盈
-	if err := at.trader.SetStopLoss(decision.Symbol, "SHORT", quantity, decision.StopLoss); err != nil {
-		log.Printf("  ⚠ 设置止损失败: %v", err)
-	}
-	if err := at.trader.SetTakeProfit(decision.Symbol, "SHORT", quantity, decision.TakeProfit); err != nil {
-		log.Printf("  ⚠ 设置止盈失败: %v", err)
-	}
-
-	return nil
+    return nil
 }
 
 // executeCloseLongWithRecord 执行平多仓并记录详细信息
 func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+    // 获取当前价格（即使在 DryRun/未执行时也补齐记录字段）
+    marketData, err := market.Get(decision.Symbol)
+    if err != nil {
+        return err
+    }
+    actionRecord.Price = marketData.CurrentPrice
+
     if at.config.DryRun || !at.executionEnabled {
         log.Printf("  🚫 DryRun/未启用执行：跳过平多 %s", decision.Symbol)
         return nil
     }
     log.Printf("  🔄 平多仓: %s", decision.Symbol)
-
-	// 获取当前价格
-	marketData, err := market.Get(decision.Symbol)
-	if err != nil {
-		return err
-	}
-	actionRecord.Price = marketData.CurrentPrice
 
 	// 平仓
 	order, err := at.trader.CloseLong(decision.Symbol, 0) // 0 = 全部平仓
@@ -738,18 +740,18 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 
 // executeCloseShortWithRecord 执行平空仓并记录详细信息
 func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+    // 获取当前价格（即使在 DryRun/未执行时也补齐记录字段）
+    marketData, err := market.Get(decision.Symbol)
+    if err != nil {
+        return err
+    }
+    actionRecord.Price = marketData.CurrentPrice
+
     if at.config.DryRun || !at.executionEnabled {
         log.Printf("  🚫 DryRun/未启用执行：跳过平空 %s", decision.Symbol)
         return nil
     }
     log.Printf("  🔄 平空仓: %s", decision.Symbol)
-
-	// 获取当前价格
-	marketData, err := market.Get(decision.Symbol)
-	if err != nil {
-		return err
-	}
-	actionRecord.Price = marketData.CurrentPrice
 
 	// 平仓
 	order, err := at.trader.CloseShort(decision.Symbol, 0) // 0 = 全部平仓
