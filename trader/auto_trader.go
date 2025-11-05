@@ -1067,7 +1067,8 @@ func (at *AutoTrader) RunAiCloseThenOpen() (map[string]interface{}, error) {
             Timestamp: time.Now(),
             Success:   false,
         }
-        if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
+        err = at.executeDecisionWithRecord(&d, &actionRecord)
+        if err != nil {
             actionRecord.Error = err.Error()
             closeRecord.ExecutionLog = append(closeRecord.ExecutionLog, fmt.Sprintf("%s %s failed: %v", d.Symbol, d.Action, err))
             closeRecord.Success = false
@@ -1077,7 +1078,8 @@ func (at *AutoTrader) RunAiCloseThenOpen() (map[string]interface{}, error) {
         }
         closeRecord.Decisions = append(closeRecord.Decisions, actionRecord)
     }
-    if err := at.decisionLogger.LogDecision(closeRecord); err != nil {
+    err = at.decisionLogger.LogDecision(closeRecord)
+    if err != nil {
         log.Printf("Failed to save close phase decision record: %v", err)
     }
 
@@ -1116,7 +1118,8 @@ func (at *AutoTrader) RunAiCloseThenOpen() (map[string]interface{}, error) {
             Timestamp: time.Now(),
             Success:   false,
         }
-        if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
+        err = at.executeDecisionWithRecord(&d, &actionRecord)
+        if err != nil {
             actionRecord.Error = err.Error()
             openRecord.ExecutionLog = append(openRecord.ExecutionLog, fmt.Sprintf("%s %s failed: %v", d.Symbol, d.Action, err))
             openRecord.Success = false
@@ -1126,7 +1129,8 @@ func (at *AutoTrader) RunAiCloseThenOpen() (map[string]interface{}, error) {
         }
         openRecord.Decisions = append(openRecord.Decisions, actionRecord)
     }
-    if err := at.decisionLogger.LogDecision(openRecord); err != nil {
+    err = at.decisionLogger.LogDecision(openRecord)
+    if err != nil {
         log.Printf("Failed to save open phase decision record: %v", err)
     }
 
