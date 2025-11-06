@@ -90,6 +90,7 @@ type FullDecision struct {
 }
 
 // GetFullDecision 获取AI的完整交易决策（批量分析所有币种和持仓）
+// 保留原接口：继续使用包级默认客户端（兼容旧调用）
 func GetFullDecision(ctx *Context) (*FullDecision, error) {
 	// 1. 为所有币种获取市场数据
 	if err := fetchMarketDataForContext(ctx); err != nil {
@@ -100,11 +101,11 @@ func GetFullDecision(ctx *Context) (*FullDecision, error) {
 	systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
 	userPrompt := buildUserPrompt(ctx)
 
-	// 3. 调用AI API（使用 system + user prompt）
-	aiResponse, err := mcp.CallWithMessages(systemPrompt, userPrompt)
-	if err != nil {
-		return nil, fmt.Errorf("failed to call AI API: %w", err)
-	}
+    // 3. 调用AI API（使用 system + user prompt）
+    aiResponse, err := mcp.CallWithMessages(systemPrompt, userPrompt)
+    if err != nil {
+        return nil, fmt.Errorf("failed to call AI API: %w", err)
+    }
 
 	// 4. 解析AI响应
 	decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
@@ -114,7 +115,35 @@ func GetFullDecision(ctx *Context) (*FullDecision, error) {
 
 	decision.Timestamp = time.Now()
 	decision.UserPrompt = userPrompt // 保存输入prompt
-	return decision, nil
+    return decision, nil
+}
+
+// GetFullDecisionWithClient 使用指定的AI客户端获取完整交易决策（推荐，避免全局冲突）
+func GetFullDecisionWithClient(client *mcp.Client, ctx *Context) (*FullDecision, error) {
+    // 1. 为所有币种获取市场数据
+    if err := fetchMarketDataForContext(ctx); err != nil {
+        return nil, fmt.Errorf("failed to fetch market data: %w", err)
+    }
+
+    // 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
+    systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+    userPrompt := buildUserPrompt(ctx)
+
+    // 3. 调用AI API（使用 system + user prompt）——使用传入client避免defaultClient被其他trader覆盖
+    aiResponse, err := client.CallWithMessages(systemPrompt, userPrompt)
+    if err != nil {
+        return nil, fmt.Errorf("failed to call AI API: %w", err)
+    }
+
+    // 4. 解析AI响应
+    decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+    if err != nil {
+        return nil, fmt.Errorf("failed to parse AI response: %w", err)
+    }
+
+    decision.Timestamp = time.Now()
+    decision.UserPrompt = userPrompt // 保存输入prompt
+    return decision, nil
 }
 
 // fetchMarketDataForContext 为上下文中的所有币种获取市场数据和OI数据

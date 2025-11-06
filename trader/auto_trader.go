@@ -74,15 +74,16 @@ type AutoTraderConfig struct {
 
 // AutoTrader 自动交易器
 type AutoTrader struct {
-	id                   string                 // Trader唯一标识
-	name                 string                 // Trader显示名称
-	aiModel              string                 // AI模型名称
-	exchange             string                 // 交易平台名称
-	config               AutoTraderConfig
-	trader               Trader                 // 使用Trader接口（支持多平台）
-	decisionLogger       *logger.DecisionLogger // 决策日志记录器
-	initialBalance       float64
-	dailyPnL             float64
+    id                   string                 // Trader唯一标识
+    name                 string                 // Trader显示名称
+    aiModel              string                 // AI模型名称
+    exchange             string                 // 交易平台名称
+    aiClient             *mcp.Client            // 每个trader独立的AI客户端，避免全局冲突
+    config               AutoTraderConfig
+    trader               Trader                 // 使用Trader接口（支持多平台）
+    decisionLogger       *logger.DecisionLogger // 决策日志记录器
+    initialBalance       float64
+    dailyPnL             float64
 	lastResetTime        time.Time
 	stopUntil            time.Time
 	isRunning            bool
@@ -109,20 +110,18 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		}
 	}
 
-	// 初始化AI
-	if config.AIModel == "custom" {
-		// 使用自定义API
-		mcp.SetCustomAPI(config.CustomAPIURL, config.CustomAPIKey, config.CustomModelName)
-		log.Printf("🤖 [%s] 使用自定义AI API: %s (模型: %s)", config.Name, config.CustomAPIURL, config.CustomModelName)
-	} else if config.UseQwen || config.AIModel == "qwen" {
-		// 使用Qwen
-		mcp.SetQwenAPIKey(config.QwenKey, "")
-		log.Printf("🤖 [%s] 使用阿里云Qwen AI", config.Name)
-	} else {
-		// 默认使用DeepSeek
-		mcp.SetDeepSeekAPIKey(config.DeepSeekKey)
-		log.Printf("🤖 [%s] 使用DeepSeek AI", config.Name)
-	}
+    // 初始化AI（按trader隔离客户端，避免共享全局defaultClient导致相互覆盖）
+    var aiClient = mcp.New()
+    if config.AIModel == "custom" {
+        aiClient.SetCustomAPI(config.CustomAPIURL, config.CustomAPIKey, config.CustomModelName)
+        log.Printf("🤖 [%s] 使用自定义AI API: %s (模型: %s)", config.Name, config.CustomAPIURL, config.CustomModelName)
+    } else if config.UseQwen || config.AIModel == "qwen" {
+        aiClient.SetQwenAPIKey(config.QwenKey, "")
+        log.Printf("🤖 [%s] 使用阿里云Qwen AI", config.Name)
+    } else {
+        aiClient.SetDeepSeekAPIKey(config.DeepSeekKey)
+        log.Printf("🤖 [%s] 使用DeepSeek AI", config.Name)
+    }
 
 	// 初始化币种池API
 	if config.CoinPoolAPIURL != "" {
@@ -174,15 +173,16 @@ case "binance":
 	decisionLogger := logger.NewDecisionLogger(logDir)
 
     return &AutoTrader{
-		id:                   config.ID,
-		name:                 config.Name,
-		aiModel:              config.AIModel,
-		exchange:             config.Exchange,
-		config:               config,
-		trader:               trader,
-		decisionLogger:       decisionLogger,
-		initialBalance:       config.InitialBalance,
-		lastResetTime:        time.Now(),
+        id:                   config.ID,
+        name:                 config.Name,
+        aiModel:              config.AIModel,
+        exchange:             config.Exchange,
+        aiClient:             aiClient,
+        config:               config,
+        trader:               trader,
+        decisionLogger:       decisionLogger,
+        initialBalance:       config.InitialBalance,
+        lastResetTime:        time.Now(),
 		startTime:            time.Now(),
 		callCount:            0,
         isRunning:            false,
@@ -298,7 +298,7 @@ func (at *AutoTrader) runCycle() error {
 
 	// 4. 调用AI获取完整决策
     log.Println("Requesting AI analysis and decisions...")
-	decision, err := decision.GetFullDecision(ctx)
+    decision, err := decision.GetFullDecisionWithClient(at.aiClient, ctx)
 
 	// 即使有错误，也保存思维链、决策和输入prompt（用于debug）
 	if decision != nil {
@@ -1172,7 +1172,7 @@ func (at *AutoTrader) RunAiCloseThenOpen() (map[string]interface{}, error) {
         return nil, fmt.Errorf("failed to build trading context: %w", err)
     }
 
-    fullDecision, err := decision.GetFullDecision(ctx)
+    fullDecision, err := decision.GetFullDecisionWithClient(at.aiClient, ctx)
     if err != nil {
         return nil, fmt.Errorf("failed to get AI decisions for close phase: %w", err)
     }
@@ -1235,7 +1235,7 @@ func (at *AutoTrader) RunAiCloseThenOpen() (map[string]interface{}, error) {
     if err != nil {
         return nil, fmt.Errorf("failed to build trading context for open phase: %w", err)
     }
-    fullDecision2, err := decision.GetFullDecision(ctx2)
+    fullDecision2, err := decision.GetFullDecisionWithClient(at.aiClient, ctx2)
     if err != nil {
         return nil, fmt.Errorf("failed to get AI decisions for open phase: %w", err)
     }
