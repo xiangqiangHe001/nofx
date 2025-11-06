@@ -61,17 +61,6 @@ export default function AILearning({ traderId }: AILearningProps) {
     }
   );
 
-  // 当 AI 学习统计为 0 时，尝试获取 OKX 成交记录以辅助展示
-  const { data: fills } = useSWR<any[]>(
-    performance && performance.total_trades === 0 && traderId ? `okx-fills-${traderId}` : null,
-    () => api.getOkxFills(traderId, 5000),
-    {
-      refreshInterval: 30000,
-      revalidateOnFocus: false,
-      dedupingInterval: 20000,
-    }
-  );
-
   // 当 AI 学习统计为 0 或接口报错时，回退到最近决策以抑制错误提示并提供参考数据
   const { data: latestDecisions } = useSWR<any[]>(
     ((performance && performance.total_trades === 0) || error) && traderId
@@ -122,32 +111,7 @@ export default function AILearning({ traderId }: AILearningProps) {
         <div style={{ color: '#848E9C' }}>
           {t('noCompleteData', language)}
         </div>
-        {fills && (
-          <div>
-            <div className="mt-2 text-xs" style={{ color: '#94A3B8' }}>
-              ✅ 已获取成交记录：{fills.length} 条（来自 OKX）
-            </div>
-            {/* 简版成交记录列表 */}
-            <div className="mt-3 rounded border" style={{ borderColor: 'rgba(240, 185, 11, 0.3)' }}>
-              <div className="p-2 text-xs font-bold" style={{ color: '#FCD34D', background: 'rgba(240,185,11,0.1)' }}>OKX 成交记录（回退展示）</div>
-              <div className="max-h-64 overflow-y-auto divide-y" style={{ borderColor: 'rgba(240, 185, 11, 0.2)' }}>
-                {(fills || []).slice(0, 10).map((f: any, idx: number) => (
-                  <div key={idx} className="p-2 flex items-center justify-between" style={{ borderColor: 'rgba(240, 185, 11, 0.1)' }}>
-                    <div className="text-xs" style={{ color: '#CBD5E1' }}>
-                      <span className="font-mono font-bold" style={{ color: '#E0E7FF' }}>{f?.instId || f?.symbol || '-'}</span>
-                      <span className="ml-2 px-2 py-0.5 rounded" style={{ background: 'rgba(240,185,11,0.15)', color: '#FCD34D' }}>{(f?.side || f?.S) ? String(f?.side || f?.S).toUpperCase() : '-'}</span>
-                    </div>
-                    <div className="text-right text-xs">
-                      <div className="font-mono" style={{ color: '#CBD5E1' }}>{f?.fillPx || f?.price || '-'}</div>
-                      <div className="font-mono" style={{ color: '#94A3B8' }}>{f?.fillSz || f?.size || '-'}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-        {!fills && latestDecisions && (
+        {latestDecisions && (
           <div>
             <div className="mt-2 text-xs" style={{ color: '#94A3B8' }}>
               ✅ 已获取最近决策：{latestDecisions.length} 条（回退）

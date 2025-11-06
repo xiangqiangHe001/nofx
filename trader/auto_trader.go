@@ -307,6 +307,9 @@ func (at *AutoTrader) runCycle() error {
 		if len(decision.Decisions) > 0 {
 			decisionJSON, _ := json.MarshalIndent(decision.Decisions, "", "  ")
 			record.DecisionJSON = string(decisionJSON)
+		} else {
+			// 保证第二步JSON决策数组在无决策时也有可视化输出
+			record.DecisionJSON = "[]"
 		}
 	}
 
@@ -759,6 +762,29 @@ func (at *AutoTrader) ManualOpenLong(symbol string, usd float64, leverage int) (
     if err := at.trader.SetTakeProfit(symbol, "LONG", quantity, takeProfit); err != nil {
         log.Printf("  ⚠ 设置止盈失败(手动): %v", err)
     }
+    // 写入决策日志（手动）
+    var orderID int64
+    if oid, ok := order["orderId"].(int64); ok {
+        orderID = oid
+    }
+    action := logger.DecisionAction{
+        Action:    "open_long",
+        Symbol:    symbol,
+        Quantity:  quantity,
+        Leverage:  leverage,
+        Price:     price,
+        OrderID:   orderID,
+        Timestamp: time.Now(),
+        Success:   true,
+    }
+    record := &logger.DecisionRecord{
+        Decisions:    []logger.DecisionAction{action},
+        ExecutionLog: []string{fmt.Sprintf("manual open_long %s qty=%.4f lev=%d price=%.4f", symbol, quantity, leverage, price)},
+        Success:      true,
+    }
+    if at.decisionLogger != nil {
+        _ = at.decisionLogger.LogDecision(record)
+    }
 
     return order, nil
 }
@@ -811,6 +837,29 @@ func (at *AutoTrader) ManualOpenShort(symbol string, usd float64, leverage int) 
     if err := at.trader.SetTakeProfit(symbol, "SHORT", quantity, takeProfit); err != nil {
         log.Printf("  ⚠ 设置止盈失败(手动): %v", err)
     }
+    // 写入决策日志（手动）
+    var orderID int64
+    if oid, ok := order["orderId"].(int64); ok {
+        orderID = oid
+    }
+    action := logger.DecisionAction{
+        Action:    "open_short",
+        Symbol:    symbol,
+        Quantity:  quantity,
+        Leverage:  leverage,
+        Price:     price,
+        OrderID:   orderID,
+        Timestamp: time.Now(),
+        Success:   true,
+    }
+    record := &logger.DecisionRecord{
+        Decisions:    []logger.DecisionAction{action},
+        ExecutionLog: []string{fmt.Sprintf("manual open_short %s qty=%.4f lev=%d price=%.4f", symbol, quantity, leverage, price)},
+        Success:      true,
+    }
+    if at.decisionLogger != nil {
+        _ = at.decisionLogger.LogDecision(record)
+    }
 
     return order, nil
 }
@@ -820,7 +869,47 @@ func (at *AutoTrader) ManualCloseLong(symbol string) (map[string]interface{}, er
     if !at.executionEnabled {
         return nil, fmt.Errorf("execution disabled: 跳过平多 %s", symbol)
     }
-    return at.trader.CloseLong(symbol, 0)
+    // 记录当前价格和数量用于日志
+    price, _ := at.trader.GetMarketPrice(symbol)
+    qty := 0.0
+    lev := 0
+    if positions, err := at.trader.GetPositions(); err == nil {
+        for _, pos := range positions {
+            if ps, ok := pos["symbol"].(string); ok && ps == symbol {
+                if side, ok := pos["side"].(string); ok && side == "long" {
+                    if q, ok := pos["positionAmt"].(float64); ok { qty = q }
+                    if l, ok := pos["leverage"].(float64); ok { lev = int(l) }
+                    break
+                }
+            }
+        }
+    }
+
+    order, err := at.trader.CloseLong(symbol, 0)
+    if err != nil {
+        return nil, err
+    }
+    var orderID int64
+    if oid, ok := order["orderId"].(int64); ok { orderID = oid }
+
+    action := logger.DecisionAction{
+        Action:    "close_long",
+        Symbol:    symbol,
+        Quantity:  qty,
+        Leverage:  lev,
+        Price:     price,
+        OrderID:   orderID,
+        Timestamp: time.Now(),
+        Success:   true,
+    }
+    record := &logger.DecisionRecord{
+        Decisions:    []logger.DecisionAction{action},
+        ExecutionLog: []string{fmt.Sprintf("manual close_long %s qty=%.4f price=%.4f", symbol, qty, price)},
+        Success:      true,
+    }
+    if at.decisionLogger != nil { _ = at.decisionLogger.LogDecision(record) }
+
+    return order, nil
 }
 
 // ManualCloseShort 手动平空（quantity=0 全平）
@@ -828,7 +917,47 @@ func (at *AutoTrader) ManualCloseShort(symbol string) (map[string]interface{}, e
     if !at.executionEnabled {
         return nil, fmt.Errorf("execution disabled: 跳过平空 %s", symbol)
     }
-    return at.trader.CloseShort(symbol, 0)
+    // 记录当前价格和数量用于日志
+    price, _ := at.trader.GetMarketPrice(symbol)
+    qty := 0.0
+    lev := 0
+    if positions, err := at.trader.GetPositions(); err == nil {
+        for _, pos := range positions {
+            if ps, ok := pos["symbol"].(string); ok && ps == symbol {
+                if side, ok := pos["side"].(string); ok && side == "short" {
+                    if q, ok := pos["positionAmt"].(float64); ok { qty = q }
+                    if l, ok := pos["leverage"].(float64); ok { lev = int(l) }
+                    break
+                }
+            }
+        }
+    }
+
+    order, err := at.trader.CloseShort(symbol, 0)
+    if err != nil {
+        return nil, err
+    }
+    var orderID int64
+    if oid, ok := order["orderId"].(int64); ok { orderID = oid }
+
+    action := logger.DecisionAction{
+        Action:    "close_short",
+        Symbol:    symbol,
+        Quantity:  qty,
+        Leverage:  lev,
+        Price:     price,
+        OrderID:   orderID,
+        Timestamp: time.Now(),
+        Success:   true,
+    }
+    record := &logger.DecisionRecord{
+        Decisions:    []logger.DecisionAction{action},
+        ExecutionLog: []string{fmt.Sprintf("manual close_short %s qty=%.4f price=%.4f", symbol, qty, price)},
+        Success:      true,
+    }
+    if at.decisionLogger != nil { _ = at.decisionLogger.LogDecision(record) }
+
+    return order, nil
 }
 
 // executeCloseLongWithRecord 执行平多仓并记录详细信息
@@ -1055,8 +1184,20 @@ func (at *AutoTrader) RunAiCloseThenOpen() (map[string]interface{}, error) {
             closeDecisions = append(closeDecisions, d)
         }
     }
-
     closeRecord := &logger.DecisionRecord{ExecutionLog: []string{}, Success: true}
+    // 补齐提示与思维链，确保前端步骤1可视化
+    closeRecord.InputPrompt = fullDecision.UserPrompt
+    closeRecord.CoTTrace = fullDecision.CoTTrace
+    // 补齐JSON决策数组，确保前端步骤2在无决策时也显示为 []
+    if len(closeDecisions) > 0 {
+        if b, err := json.MarshalIndent(closeDecisions, "", "  "); err == nil {
+            closeRecord.DecisionJSON = string(b)
+        } else {
+            closeRecord.DecisionJSON = "[]"
+        }
+    } else {
+        closeRecord.DecisionJSON = "[]"
+    }
     for _, d := range closeDecisions {
         actionRecord := logger.DecisionAction{
             Action:    d.Action,
@@ -1106,8 +1247,20 @@ func (at *AutoTrader) RunAiCloseThenOpen() (map[string]interface{}, error) {
             openDecisions = append(openDecisions, d)
         }
     }
-
     openRecord := &logger.DecisionRecord{ExecutionLog: []string{}, Success: true}
+    // 补齐提示与思维链，确保前端步骤1可视化
+    openRecord.InputPrompt = fullDecision2.UserPrompt
+    openRecord.CoTTrace = fullDecision2.CoTTrace
+    // 补齐JSON决策数组，确保前端步骤2在无决策时也显示为 []
+    if len(openDecisions) > 0 {
+        if b, err := json.MarshalIndent(openDecisions, "", "  "); err == nil {
+            openRecord.DecisionJSON = string(b)
+        } else {
+            openRecord.DecisionJSON = "[]"
+        }
+    } else {
+        openRecord.DecisionJSON = "[]"
+    }
     for _, d := range openDecisions {
         actionRecord := logger.DecisionAction{
             Action:    d.Action,

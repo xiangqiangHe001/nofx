@@ -5,10 +5,10 @@ import (
     "log"
     "net/http"
     "nofx/manager"
-    "nofx/logger"
     "sort"
     "strconv"
     "time"
+    "strings"
 
     "github.com/gin-gonic/gin"
 )
@@ -39,10 +39,25 @@ func NewServer(traderManager *manager.TraderManager, port int) *Server {
 		port:          port,
 	}
 
-	// 设置路由
-	s.setupRoutes()
+    // 设置路由
+    s.setupRoutes()
 
-	return s
+    // 静态站点：仅挂载 assets 目录，避免与 /api 路由冲突
+    router.Static("/assets", "./web/dist/assets")
+    // 根路径返回 index.html
+    router.GET("/", func(c *gin.Context) {
+        c.File("./web/dist/index.html")
+    })
+    router.NoRoute(func(c *gin.Context) {
+        p := c.Request.URL.Path
+        if strings.HasPrefix(p, "/api/") {
+            c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
+            return
+        }
+        c.File("./web/dist/index.html")
+    })
+
+    return s
 }
 
 // corsMiddleware CORS中间件
@@ -100,17 +115,19 @@ func requestLogger() gin.HandlerFunc {
 
 // setupRoutes 设置路由
 func (s *Server) setupRoutes() {
-	// 健康检查
-	s.router.Any("/health", s.handleHealth)
+    // 健康检查
+    s.router.Any("/health", s.handleHealth)
 
-	// API路由组
-	api := s.router.Group("/api")
+    // API路由组
+    api := s.router.Group("/api")
     {
-		// 竞赛总览
-		api.GET("/competition", s.handleCompetition)
+        // 将健康检查也暴露在 /api/health，保持前端对所有 API 走 /api 前缀的一致性
+        api.GET("/health", s.handleHealth)
+        // 竞赛总览
+        api.GET("/competition", s.handleCompetition)
 
-		// Trader列表
-		api.GET("/traders", s.handleTraderList)
+        // Trader列表
+        api.GET("/traders", s.handleTraderList)
 
 		// 指定trader的数据（使用query参数 ?trader_id=xxx）
 		api.GET("/status", s.handleStatus)
@@ -603,8 +620,8 @@ func (s *Server) handlePerformance(c *gin.Context) {
         return
     }
 
-    // 分析最近20个周期的交易表现
-    performance, err := trader.GetDecisionLogger().AnalyzePerformance(20)
+    // 分析最近较大窗口的交易表现（扩大到100个周期，避免短期“观望”导致数据为空）
+    performance, err := trader.GetDecisionLogger().AnalyzePerformance(100)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{
             "error": fmt.Sprintf("分析历史表现失败: %v", err),
@@ -612,159 +629,7 @@ func (s *Server) handlePerformance(c *gin.Context) {
         return
     }
 
-    // 基于成交记录的回退：
-    // 1) 决策日志无法形成有效交易（TotalTrades==0）
-    // 2) 或仅有盈利、没有任何亏损（可能窗口内样本不完整导致 ProfitFactor 显示为 999）
-    //    这类情形下尝试用 OKX 成交记录进行补全估算
-    if performance != nil && (performance.TotalTrades == 0 || (performance.TotalTrades > 0 && performance.LosingTrades == 0 && performance.WinningTrades > 0)) {
-        // 仅针对 OKX 交易器提供回退统计
-        // 使用更大的样本来提高覆盖度
-        fills, ferr := trader.GetOKXFills(500)
-        if ferr == nil && len(fills) > 0 {
-            // 将成交记录按时间升序排序
-            sort.SliceStable(fills, func(i, j int) bool {
-                ti, _ := strconv.ParseInt(fmt.Sprintf("%v", fills[i]["timestamp"]), 10, 64)
-                tj, _ := strconv.ParseInt(fmt.Sprintf("%v", fills[j]["timestamp"]), 10, 64)
-                return ti < tj
-            })
-
-            // 每个 inst_id + pos_side 的持仓状态
-            type posState struct {
-                openQty      float64
-                avgOpenPrice float64
-                openTimeMs   int64
-            }
-            states := make(map[string]*posState)
-
-            totalWin := 0.0
-            totalLoss := 0.0
-            symbolStats := make(map[string]*logger.SymbolPerformance)
-
-            // 构造最近交易（最多10条）
-            var recent []logger.TradeOutcome
-
-            for _, f := range fills {
-                symbol := fmt.Sprintf("%v", f["symbol"]) // 例如 BTCUSDT
-                instID := fmt.Sprintf("%v", f["inst_id"]) // 例如 BTC-USDT-SWAP
-                side := fmt.Sprintf("%v", f["side"])      // buy/sell
-                posSide := fmt.Sprintf("%v", f["pos_side"]) // long/short
-                price, _ := f["price"].(float64)
-                qty, _ := f["quantity"].(float64)
-                tsStr := fmt.Sprintf("%v", f["timestamp"]) // 毫秒时间戳字符串
-                tsMs, _ := strconv.ParseInt(tsStr, 10, 64)
-
-                key := instID + "/" + posSide
-                st := states[key]
-                if st == nil {
-                    st = &posState{}
-                    states[key] = st
-                }
-
-                // long: buy 增加持仓，sell 减少持仓（产生收益）
-                // short: sell 增加持仓，buy 减少持仓（产生收益）
-                isOpen := (posSide == "long" && side == "buy") || (posSide == "short" && side == "sell")
-                isClose := (posSide == "long" && side == "sell") || (posSide == "short" && side == "buy")
-
-                if isOpen && qty > 0 && price > 0 {
-                    // 加权更新开仓均价
-                    newQty := st.openQty + qty
-                    if newQty > 0 {
-                        st.avgOpenPrice = (st.avgOpenPrice*st.openQty + price*qty) / newQty
-                    } else {
-                        st.avgOpenPrice = price
-                    }
-                    st.openQty = newQty
-                    if st.openTimeMs == 0 { st.openTimeMs = tsMs }
-                } else if isClose && qty > 0 && st.openQty > 0 && st.avgOpenPrice > 0 {
-                    closed := qty
-                    if closed > st.openQty { closed = st.openQty }
-
-                    var pnl float64
-                    if posSide == "long" {
-                        pnl = closed * (price - st.avgOpenPrice)
-                    } else { // short
-                        pnl = closed * (st.avgOpenPrice - price)
-                    }
-
-                    // 更新持仓剩余
-                    st.openQty -= closed
-                    if st.openQty <= 0 {
-                        st.openQty = 0
-                        st.avgOpenPrice = 0
-                        st.openTimeMs = 0
-                    }
-
-                    // 记录交易结果（用于最近交易展示和统计）
-                    outcome := logger.TradeOutcome{
-                        Symbol:        symbol,
-                        Side:          posSide,
-                        Quantity:      closed,
-                        Leverage:      1,
-                        OpenPrice:     st.avgOpenPrice,
-                        ClosePrice:    price,
-                        PositionValue: closed * st.avgOpenPrice,
-                        MarginUsed:    closed * st.avgOpenPrice, // 以杠杆1估算
-                        PnL:           pnl,
-                        PnLPct:        0, // 无法精准估算，设为0
-                        Duration:      "",
-                        OpenTime:      time.UnixMilli(st.openTimeMs),
-                        CloseTime:     time.UnixMilli(tsMs),
-                        WasStopLoss:   false,
-                    }
-                    recent = append(recent, outcome)
-
-                    // 汇总总交易与赢亏
-                    performance.TotalTrades++
-                    if pnl > 0 {
-                        performance.WinningTrades++
-                        totalWin += pnl
-                    } else if pnl < 0 {
-                        performance.LosingTrades++
-                        totalLoss += pnl // 负数
-                    }
-
-                    // 更新币种统计
-                    if _, ok := symbolStats[symbol]; !ok {
-                        symbolStats[symbol] = &logger.SymbolPerformance{Symbol: symbol}
-                    }
-                    ss := symbolStats[symbol]
-                    ss.TotalTrades++
-                    ss.TotalPnL += pnl
-                    if pnl > 0 { ss.WinningTrades++ } else if pnl < 0 { ss.LosingTrades++ }
-                }
-            }
-
-            // 计算总体指标
-            performance.RecentTrades = recent
-            performance.SymbolStats = symbolStats
-            if performance.TotalTrades > 0 {
-                performance.WinRate = (float64(performance.WinningTrades) / float64(performance.TotalTrades)) * 100
-                if performance.WinningTrades > 0 {
-                    performance.AvgWin = totalWin / float64(performance.WinningTrades)
-                }
-                if performance.LosingTrades > 0 {
-                    performance.AvgLoss = totalLoss / float64(performance.LosingTrades)
-                }
-                if totalLoss != 0 {
-                    performance.ProfitFactor = totalWin / (-totalLoss)
-                } else if totalWin > 0 {
-                    performance.ProfitFactor = 999.0
-                }
-
-                // 币种胜率/平均值与最佳/最差
-                bestPnL := -1e9
-                worstPnL := 1e9
-                for sym, ss := range performance.SymbolStats {
-                    if ss.TotalTrades > 0 {
-                        ss.WinRate = (float64(ss.WinningTrades) / float64(ss.TotalTrades)) * 100
-                        ss.AvgPnL = ss.TotalPnL / float64(ss.TotalTrades)
-                        if ss.TotalPnL > bestPnL { bestPnL = ss.TotalPnL; performance.BestSymbol = sym }
-                        if ss.TotalPnL < worstPnL { worstPnL = ss.TotalPnL; performance.WorstSymbol = sym }
-                    }
-                }
-            }
-        }
-    }
+    // 回退逻辑与模拟平仓已移除，保留原始 AnalyzePerformance 输出
 
     c.JSON(http.StatusOK, performance)
 }

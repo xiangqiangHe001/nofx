@@ -7,6 +7,7 @@ import (
     "math"
     "os"
     "path/filepath"
+    "sort"
     "strconv"
     "strings"
     "time"
@@ -148,41 +149,38 @@ func (l *DecisionLogger) LogDecision(record *DecisionRecord) error {
 
 // GetLatestRecords 获取最近N条记录（按时间正序：从旧到新）
 func (l *DecisionLogger) GetLatestRecords(n int) ([]*DecisionRecord, error) {
-	files, err := ioutil.ReadDir(l.logDir)
-	if err != nil {
-		return nil, fmt.Errorf("读取日志目录失败: %w", err)
-	}
+    files, err := ioutil.ReadDir(l.logDir)
+    if err != nil {
+        return nil, fmt.Errorf("读取日志目录失败: %w", err)
+    }
+    // 按修改时间倒序排序（最新的在前）
+    sort.Slice(files, func(i, j int) bool {
+        return files[i].ModTime().After(files[j].ModTime())
+    })
 
-	// 先按修改时间倒序收集（最新的在前）
-	var records []*DecisionRecord
-	count := 0
-	for i := len(files) - 1; i >= 0 && count < n; i-- {
-		file := files[i]
-		if file.IsDir() {
-			continue
-		}
+    // 收集前 n 条记录
+    var latest []*DecisionRecord
+    count := 0
+    for _, file := range files {
+        if count >= n { break }
+        if file.IsDir() { continue }
+        fp := filepath.Join(l.logDir, file.Name())
+        data, err := ioutil.ReadFile(fp)
+        if err != nil { continue }
 
-		filepath := filepath.Join(l.logDir, file.Name())
-		data, err := ioutil.ReadFile(filepath)
-		if err != nil {
-			continue
-		}
+        var record DecisionRecord
+        if err := json.Unmarshal(data, &record); err != nil { continue }
 
-		var record DecisionRecord
-		if err := json.Unmarshal(data, &record); err != nil {
-			continue
-		}
+        latest = append(latest, &record)
+        count++
+    }
 
-		records = append(records, &record)
-		count++
-	}
+    // 反转为时间正序（旧到新，适合图表）
+    for i, j := 0, len(latest)-1; i < j; i, j = i+1, j-1 {
+        latest[i], latest[j] = latest[j], latest[i]
+    }
 
-	// 反转数组，让时间从旧到新排列（用于图表显示）
-	for i, j := 0, len(records)-1; i < j; i, j = i+1, j-1 {
-		records[i], records[j] = records[j], records[i]
-	}
-
-	return records, nil
+    return latest, nil
 }
 
 // GetRecordByDate 获取指定日期的所有记录

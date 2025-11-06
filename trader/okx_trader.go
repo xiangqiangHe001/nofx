@@ -845,6 +845,8 @@ func (o *OKXTrader) GetFills(limit int) ([]map[string]interface{}, error) {
             InstID  string `json:"instId"`
             Side    string `json:"side"`
             PosSide string `json:"posSide"`
+            // OKX 文档字段为 fillPx（成交价格），部分示例/兼容可能出现 px；这里双字段兼容
+            FillPx  string `json:"fillPx"`
             Px      string `json:"px"`
             FillSz  string `json:"fillSz"`
             TradeID string `json:"tradeId"`
@@ -867,7 +869,10 @@ func (o *OKXTrader) GetFills(limit int) ([]map[string]interface{}, error) {
     var result []map[string]interface{}
     for _, f := range payload.Data {
         symbol := fromOKXInstID(f.InstID)
-        price := parseFloat(f.Px)
+        // 兼容 fillPx 与 px，优先使用 fillPx
+        priceStr := f.FillPx
+        if priceStr == "" { priceStr = f.Px }
+        price := parseFloat(priceStr)
         contracts := parseFloat(f.FillSz)
         ctVal := o.getCTVal(f.InstID)
         if ctVal <= 0 { ctVal = 1.0 }
