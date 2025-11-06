@@ -379,17 +379,13 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 
 	sb.WriteString("止盈规则：\n\n")
 
-	sb.WriteString("三目标止盈法（基于1小时图斐波那契扩展，分层锁定）：\n\n")
+	sb.WriteString("目标止盈法：\n\n")
 
-	sb.WriteString("第一目标（平仓30%）：1小时图斐波那契127.2%扩展或维科夫区间高度1倍投射。移动剩余止损至成本价。\n\n")
+	sb.WriteString("首选基于斐波那契扩展位（127.2%, 161.8%）、缠论结构破坏点、维科夫SOS/BC目标区进行动态止盈。当动态预期风险回报比无法达到1:2时，应放弃交易。固定百分比仅作为保护性移动止损的触发条件：\n\n")
 
-	sb.WriteString("第二目标（平仓40%）：1小时图斐波那契161.8%扩展或缠论线段第一目标。移动止损至第一目标位。\n\n")
+	sb.WriteString("今日交易总收益10%，今天停止交易：\n\n")
 
-	sb.WriteString("第三目标（平仓30%）：1小时图斐波那契261.8%扩展或维科夫趋势衰竭信号（如BC或SOT）。或使用移动止损跟踪（如以1小时图缠论笔端点或EMA 21跟踪）。\n\n")
-
-	sb.WriteString("加密货币注意：1小时图目标需与日线趋势一致，避免过度扩展。\n\n")
-
-	sb.WriteString("风险控制：单笔风险不超过账户资金30%，风险回报比至少1:2。\n\n")
+	sb.WriteString("风险控制：单笔风险不超过账户资金10%，风险回报比至少1:3。\n\n")
 
 	sb.WriteString("步骤7：持仓时间动态管理（整合PDF精华）\n\n")
 
@@ -574,7 +570,11 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("- 必须输出**严格合法的JSON数组**，不要包含注释、尾随逗号、NaN、Infinity、或任何非JSON内容\n")
 	sb.WriteString("- `risk_usd` 必须是**数字字面量**（例如 `300`），**禁止**使用公式或表达式（如 `35 * 10`、`(a+b)/c` 等）\n")
 	sb.WriteString("- 不要在JSON里写分析文字或单位（如 `300 USD`），只允许纯字段值\n")
-	sb.WriteString("- 若暂无法给出有效开仓建议，请输出空数组 `[]`，不要构造无效JSON\n\n")
+	sb.WriteString("- 若暂无法给出有效开仓建议，请输出空数组 `[]`，不要构造无效JSON\n")
+	// 杠杆与风险预算约束
+	sb.WriteString(fmt.Sprintf("- 杠杆原则：BTC/ETH 使用 %dx，其他币使用 %dx\n", btcEthLeverage, altcoinLeverage))
+	sb.WriteString(fmt.Sprintf("- 风险预算：单笔 risk_usd ≤ %.0f（不超过净值的2%%），position_size_usd 与余额匹配\n", accountEquity*0.02))
+	sb.WriteString("- 若止损/止盈要求与风险预算无法同时满足，则输出 []，并在思维链说明原因\n\n")
 
 	return sb.String()
 }
@@ -592,6 +592,18 @@ func buildUserPrompt(ctx *Context) string {
 		sb.WriteString(fmt.Sprintf("**BTC**: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n\n",
 			btcData.CurrentPrice, btcData.PriceChange1h, btcData.PriceChange4h,
 			btcData.CurrentMACD, btcData.CurrentRSI7))
+	}
+	// ETH 市场
+	if ethData, hasETH := ctx.MarketDataMap["ETHUSDT"]; hasETH {
+		sb.WriteString(fmt.Sprintf("**ETH**: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n\n",
+			ethData.CurrentPrice, ethData.PriceChange1h, ethData.PriceChange4h,
+			ethData.CurrentMACD, ethData.CurrentRSI7))
+	}
+	// SOL 市场
+	if solData, hasSOL := ctx.MarketDataMap["SOLUSDT"]; hasSOL {
+		sb.WriteString(fmt.Sprintf("**SOL**: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n\n",
+			solData.CurrentPrice, solData.PriceChange1h, solData.PriceChange4h,
+			solData.CurrentMACD, solData.CurrentRSI7))
 	}
 
 	// 账户
@@ -637,7 +649,7 @@ func buildUserPrompt(ctx *Context) string {
 	}
 
 	// 候选币种（完整市场数据）
-	sb.WriteString(fmt.Sprintf("## 候选币种 (%d个)\n\n", len(ctx.MarketDataMap)))
+	sb.WriteString(fmt.Sprintf("## 候选币种 (%d个)\n\n", len(ctx.CandidateCoins)))
 	displayedCount := 0
 	for _, coin := range ctx.CandidateCoins {
 		marketData, hasData := ctx.MarketDataMap[coin.Symbol]
@@ -720,16 +732,55 @@ func extractCoTTrace(response string) string {
 	jsonStart := strings.Index(response, "[")
 
 	if jsonStart > 0 {
-		// 思维链是JSON数组之前的内容
-		return strings.TrimSpace(response[:jsonStart])
+		// 思维链是JSON数组之前的内容；若仅为代码块标记（```json等）则视为无思维链
+		pre := strings.TrimSpace(response[:jsonStart])
+		if pre == "" || strings.HasPrefix(pre, "```") {
+			return ""
+		}
+		return pre
 	}
 
 	// 如果找不到JSON，整个响应都是思维链
 	return strings.TrimSpace(response)
 }
 
+// extractJSONFromCodeBlock 优先提取 ``` 代码块中的内容（支持 ```json）并返回其中的JSON文本
+func extractJSONFromCodeBlock(response string) (string, bool) {
+	// 找到第一个代码块起始围栏
+	start := strings.Index(response, "```")
+	if start == -1 {
+		return "", false
+	}
+	// 跳过语言标签行（如 ```json）到下一行
+	after := response[start+3:]
+	newline := strings.Index(after, "\n")
+	if newline == -1 {
+		return "", false
+	}
+	contentStart := start + 3 + newline + 1
+	// 查找结束围栏
+	endFence := strings.Index(response[contentStart:], "```")
+	if endFence == -1 {
+		return "", false
+	}
+	block := strings.TrimSpace(response[contentStart : contentStart+endFence])
+	// 如果代码块中包含JSON数组，提取最外层的完整数组
+	arrayStart := strings.Index(block, "[")
+	if arrayStart != -1 {
+		if arrayEnd := findMatchingBracket(block, arrayStart); arrayEnd != -1 {
+			return strings.TrimSpace(block[arrayStart : arrayEnd+1]), true
+		}
+	}
+	return block, true
+}
+
 // extractDecisions 提取JSON决策列表
 func extractDecisions(response string) ([]Decision, error) {
+	// 若AI响应包含代码块围栏，优先使用围栏内的内容以提升稳定性
+	if block, ok := extractJSONFromCodeBlock(response); ok {
+		response = block
+	}
+
 	// 直接查找JSON数组 - 找第一个完整的JSON数组
 	arrayStart := strings.Index(response, "[")
 	if arrayStart == -1 {
@@ -904,8 +955,29 @@ func findMatchingBracket(s string, start int) int {
 	}
 
 	depth := 0
+	inString := false
+	escaped := false
+
 	for i := start; i < len(s); i++ {
-		switch s[i] {
+		c := s[i]
+
+		if inString {
+			if escaped {
+				// 当前字符被转义，跳过并清除转义状态
+				escaped = false
+			} else {
+				if c == '\\' {
+					escaped = true
+				} else if c == '"' {
+					inString = false
+				}
+			}
+			continue
+		}
+
+		switch c {
+		case '"':
+			inString = true
 		case '[':
 			depth++
 		case ']':

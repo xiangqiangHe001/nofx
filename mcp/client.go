@@ -144,12 +144,12 @@ func (cfg *Client) callOnce(systemPrompt, userPrompt string) (string, error) {
 	})
 
 	// 构建请求体
-	requestBody := map[string]interface{}{
-		"model":       cfg.Model,
-		"messages":    messages,
-		"temperature": 0.5, // 降低temperature以提高JSON格式稳定性
-		"max_tokens":  2000,
-	}
+    requestBody := map[string]interface{}{
+        "model":       cfg.Model,
+        "messages":    messages,
+        "temperature": 0.2, // 进一步降低temperature以提高格式稳定性
+        "max_tokens":  2000,
+    }
 
 	// 注意：response_format 参数仅 OpenAI 支持，DeepSeek/Qwen 不支持
 	// 我们通过强化 prompt 和后处理来确保 JSON 格式正确

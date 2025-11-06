@@ -603,9 +603,7 @@ function TraderDetailsPage({
                 <div className="text-sm" style={{ color: '#848E9C' }}>{t('aiDecisionsWillAppear', language)}</div>
               </div>
             )}
-            {decisions && decisions.length > 0 && (
-              <PlainSuggestionsFooter latestRecord={decisions[0]} />
-            )}
+            {/* 移除：最近决策卡片容器底部的简版建议行 */}
           </div>
         </div>
         {/* 右侧结束 */}
@@ -689,6 +687,112 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
   const [showInputPrompt, setShowInputPrompt] = useState<boolean>(false);
   const [showCoT, setShowCoT] = useState<boolean>(false);
 
+  // 统一计算动作列表：优先使用 decisions，其次解析 decision_json，再次回退 candidate_coins 为 wait
+  const buildActions = (): Array<{ symbol: string; action: string; quantity?: number; leverage?: number; price?: number; success?: boolean; error?: string }> => {
+    const actions = decision?.decisions || [];
+    if (actions && actions.length > 0) {
+      return actions.map((a: any) => ({
+        symbol: String(a?.symbol || '-'),
+        action: String(a?.action || '-'),
+        quantity: Number(a?.quantity || 0),
+        leverage: Number(a?.leverage || 0),
+        price: Number(a?.price || 0),
+        success: Boolean(a?.success ?? decision?.success),
+        error: a?.error,
+      }));
+    }
+
+    // 尝试从 decision_json 解析
+    let suggestions: any[] = [];
+    try {
+      const raw = (decision as any)?.decision_json;
+      if (raw && typeof raw === 'string') {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) suggestions = parsed;
+      }
+    } catch {
+      suggestions = [];
+    }
+    if (suggestions.length > 0) {
+      return suggestions.map((s: any) => ({
+        symbol: String(s?.symbol || s?.Symbol || '-'),
+        action: String(s?.action || s?.Action || 'wait'),
+        leverage: Number(s?.leverage || s?.Leverage || 0),
+        price: Number(s?.price || s?.Price || 0),
+        success: Boolean(decision?.success),
+      }));
+    }
+
+    // 最后回退：使用候选币种显示为 wait ✓
+    const coins: string[] = (decision as any)?.candidate_coins || (decision as any)?.CandidateCoins || [];
+    if (Array.isArray(coins) && coins.length > 0) {
+      return coins.map((c: any) => ({ symbol: String(c), action: 'wait', success: Boolean(decision?.success) }));
+    }
+
+    return [];
+  };
+
+  const actions = buildActions();
+
+  // 账户摘要（若有）
+  const account = (decision as any)?.account_state || (decision as any)?.AccountState;
+
+  // 提取余额不足与数值信息（required/available）
+  const logs: string[] = (decision as any)?.execution_log || [];
+  const hasInsufficient = (() => {
+    const keywords = [/INSUFFICIENT_BALANCE/i, /insufficient/i, /余额不足/];
+    const inError = keywords.some((re) => re.test(String((decision as any)?.error_message || '')));
+    const inLogs = logs.some((l) => keywords.some((re) => re.test(String(l))));
+    return inError || inLogs;
+  })();
+
+  const extractRequiredAvailable = (): { required?: number; available?: number } => {
+    const required = (decision as any)?.required_margin ?? (decision as any)?.RequiredMargin;
+    const available = (decision as any)?.available_balance ?? (decision as any)?.AvailableBalance;
+    let r = typeof required === 'number' ? required : undefined;
+    let a = typeof available === 'number' ? available : undefined;
+    if (r !== undefined && a !== undefined) return { required: r, available: a };
+    // 从日志解析
+    for (const line of logs) {
+      if (r === undefined) {
+        const m = line.match(/required\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)/i) || line.match(/所需\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/);
+        if (m) r = parseFloat(m[1]);
+      }
+      if (a === undefined) {
+        const m2 = line.match(/available\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)/i) || line.match(/可用\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/);
+        if (m2) a = parseFloat(m2[1]);
+      }
+      if (r !== undefined && a !== undefined) break;
+    }
+    return { required: r, available: a };
+  };
+
+  const parsedNumbers = extractRequiredAvailable();
+
+  // 计算所需保证金（基于首个 open_* 动作的数量、价格和杠杆）
+  const computeRequiredMargin = (): number | undefined => {
+    if (!actions || actions.length === 0) return undefined;
+    const open = actions.find((a) => String(a.action).toLowerCase().includes('open')) || actions[0];
+    const qty = Number((open as any)?.quantity || 0);
+    const price = Number(open?.price || 0);
+    const lev = Number(open?.leverage || 1);
+    if (qty > 0 && price > 0 && lev > 0) return (qty * price) / lev;
+    return undefined;
+  };
+
+  const requiredFinal = parsedNumbers.required ?? computeRequiredMargin();
+  const availableFinal = parsedNumbers.available ?? (account?.available_balance ?? account?.AvailableBalance);
+
+  const getLogColor = (log: string): string => {
+    const s = String(log);
+    if (s.includes('✓') || /成功/.test(s)) return '#0ECB81';
+    if (/INSUFFICIENT_BALANCE|insufficient|余额不足/i.test(s)) return '#F0B90B'; // amber
+    if (/MIN_NOTIONAL|最小名义|notional/i.test(s)) return '#fb7185'; // rose
+    if (/步进|increment|tick/i.test(s)) return '#a78bfa'; // violet
+    if (/network|接口|超时|timeout|连接|503|500/i.test(s)) return '#60a5fa'; // blue
+    return '#F6465D'; // default red
+  };
+
   return (
     <div className="rounded p-5 transition-all duration-300 hover:translate-y-[-2px]" style={{ border: '1px solid #2B3139', background: '#1E2329', boxShadow: '0 2px 8px rgba(0, 0, 0, 0.3)' }}>
       {/* Header */}
@@ -696,7 +800,7 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
         <div>
           <div className="font-semibold" style={{ color: '#EAECEF' }}>{t('cycle', language)} #{decision.cycle_number}</div>
           <div className="text-xs" style={{ color: '#848E9C' }}>
-            {new Date(decision.timestamp).toLocaleString()}
+            {new Date((decision as any).timestamp).toLocaleString()}
           </div>
         </div>
         <div
@@ -710,73 +814,100 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
         </div>
       </div>
 
-      {/* Input Prompt - Collapsible */}
-      {decision.input_prompt && (
-        <div className="mb-3">
-          <button
-            onClick={() => setShowInputPrompt(!showInputPrompt)}
-            className="flex items-center gap-2 text-sm transition-colors"
-            style={{ color: '#60a5fa' }}
-          >
-            <span className="font-semibold">📥 {t('inputPrompt', language)}</span>
-            <span className="text-xs">{showInputPrompt ? t('collapse', language) : t('expand', language)}</span>
-          </button>
-          {showInputPrompt && (
+      {/* Input Prompt - Collapsible (always visible) */}
+      <div className="mb-3">
+        <button
+          onClick={() => setShowInputPrompt(!showInputPrompt)}
+          className="flex items-center gap-2 text-sm transition-colors"
+          style={{ color: '#60a5fa' }}
+        >
+          <span className="font-semibold">📥 {t('inputPrompt', language)}</span>
+          <span className="text-xs">{showInputPrompt ? t('collapse', language) : t('expand', language)}</span>
+        </button>
+        {showInputPrompt && (
+          <div className="mt-2 rounded p-4 text-sm font-mono whitespace-pre-wrap max-h-96 overflow-y-auto" style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}>
+            {(decision as any)?.input_prompt || (decision as any)?.InputPrompt || '—'}
+          </div>
+        )}
+      </div>
+
+      {/* AI Chain of Thought - Collapsible (always visible) */}
+      <div className="mb-3">
+        <button
+          onClick={() => setShowCoT(!showCoT)}
+          className="flex items-center gap-2 text-sm transition-colors"
+          style={{ color: '#F0B90B' }}
+        >
+          <span className="font-semibold">📤 {t('aiThinking', language)}</span>
+          <span className="text-xs">{showCoT ? t('collapse', language) : t('expand', language)}</span>
+        </button>
+        {showCoT && (
+          <>
+            {/* 仅展示 reasoning 文本：优先从 decision_json 提取，其次回退到 cot_trace */}
             <div className="mt-2 rounded p-4 text-sm font-mono whitespace-pre-wrap max-h-96 overflow-y-auto" style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}>
-              {decision.input_prompt}
+              {(() => {
+                const raw = (decision as any)?.decision_json || (decision as any)?.DecisionJSON;
+                let reasoningText = '';
+                if (raw && typeof raw === 'string') {
+                  try {
+                    const parsed = JSON.parse(raw);
+                    if (Array.isArray(parsed)) {
+                      const texts = parsed
+                        .map((s: any) => s?.reasoning || s?.Reasoning)
+                        .filter((v: any) => typeof v === 'string' && v.trim().length > 0);
+                      if (texts.length > 0) reasoningText = texts.join('\n\n');
+                    }
+                  } catch {
+                    // ignore parse error and fall back
+                  }
+                }
+                return reasoningText || (decision as any)?.cot_trace || (decision as any)?.CoTTrace || '—';
+              })()}
             </div>
-          )}
+          </>
+        )}
+      </div>
+
+      {/* 余额不足提示条（始终出现在动作列表区域顶部；不依赖是否有动作） */}
+      {hasInsufficient && (
+        <div
+          className="mb-2 px-3 py-2 rounded text-xs font-semibold"
+          style={{ background: 'rgba(240, 185, 11, 0.12)', color: '#F0B90B', border: '1px solid rgba(240, 185, 11, 0.35)' }}
+        >
+          余额不足，已跳过开仓；所需: {requiredFinal !== undefined ? Number(requiredFinal).toFixed(2) : '—'} USDT，
+          可用: {availableFinal !== undefined ? Number(availableFinal).toFixed(2) : '—'} USDT
         </div>
       )}
 
-      {/* AI Chain of Thought - Collapsible */}
-      {decision.cot_trace && (
-        <div className="mb-3">
-          <button
-            onClick={() => setShowCoT(!showCoT)}
-            className="flex items-center gap-2 text-sm transition-colors"
-            style={{ color: '#F0B90B' }}
-          >
-            <span className="font-semibold">📤 {t('aiThinking', language)}</span>
-            <span className="text-xs">{showCoT ? t('collapse', language) : t('expand', language)}</span>
-          </button>
-          {showCoT && (
-            <div className="mt-2 rounded p-4 text-sm font-mono whitespace-pre-wrap max-h-96 overflow-y-auto" style={{ background: '#0B0E11', border: '1px solid #2B3139', color: '#EAECEF' }}>
-              {decision.cot_trace}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Decisions Actions */}
-      {decision.decisions && decision.decisions.length > 0 && (
+      {/* Decisions / Suggestions - with fallback */}
+      {actions.length > 0 && !hasInsufficient && (
         <div className="space-y-2 mb-3">
-          {decision.decisions.map((action, j) => (
+          {actions.map((a, j) => (
             <div key={j} className="flex items-center gap-2 text-sm rounded px-3 py-2" style={{ background: '#0B0E11' }}>
-              <span className="font-mono font-bold" style={{ color: '#EAECEF' }}>{action.symbol}</span>
+              <span className="font-mono font-bold" style={{ color: '#EAECEF' }}>{a.symbol}</span>
               <span
                 className="px-2 py-0.5 rounded text-xs font-bold"
-                style={action.action.includes('open')
+                style={String(a.action).includes('open')
                   ? { background: 'rgba(96, 165, 250, 0.1)', color: '#60a5fa' }
                   : { background: 'rgba(240, 185, 11, 0.1)', color: '#F0B90B' }
                 }
               >
-                {action.action}
+                {String(a.action).toLowerCase()}
               </span>
-              {action.leverage > 0 && <span style={{ color: '#F0B90B' }}>{action.leverage}x</span>}
-              {action.price > 0 && (
-                <span className="font-mono text-xs" style={{ color: '#848E9C' }}>@{action.price.toFixed(4)}</span>
+              {(a.leverage ?? 0) > 0 && <span style={{ color: '#F0B90B' }}>{a.leverage}x</span>}
+              {(a.price ?? 0) > 0 && (
+                <span className="font-mono text-xs" style={{ color: '#848E9C' }}>@{Number(a.price).toFixed(4)}</span>
               )}
-              <span style={{ color: action.success ? '#0ECB81' : '#F6465D' }}>
-                {action.success ? '✓' : '✗'}
+              <span style={{ color: a.success ? '#0ECB81' : '#F6465D' }}>
+                {a.success ? '✓' : '✗'}
               </span>
-              {action.error && <span className="text-xs ml-2" style={{ color: '#F6465D' }}>{action.error}</span>}
+              {a.error && <span className="text-xs ml-2" style={{ color: '#F6465D' }}>{a.error}</span>}
             </div>
           ))}
         </div>
       )}
 
-      {/* Account State Summary removed per request */}
+      {/* 移除：DecisionCard 内部账户摘要行 */}
 
       {/* Execution Logs */}
       {decision.execution_log && decision.execution_log.length > 0 && (
@@ -785,13 +916,15 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
             <div
               key={k}
               className="text-xs font-mono"
-              style={{ color: log.includes('✓') || log.includes('成功') ? '#0ECB81' : '#F6465D' }}
+              style={{ color: getLogColor(String(log)) }}
             >
               {log}
             </div>
           ))}
         </div>
       )}
+
+      {/* 移除：DecisionCard 底部的简版建议行 */}
 
       {/* Error Message */}
       {decision.error_message && (
