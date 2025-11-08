@@ -57,6 +57,10 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		CustomModelName:       cfg.CustomModelName,
 		ScanInterval:          cfg.GetScanInterval(),
 		InitialBalance:        cfg.InitialBalance,
+        AutoCalibrateInitialBalance: cfg.AutoCalibrateInitialBalance,
+        CalibrationThreshold:        cfg.CalibrationThreshold,
+        PersistInitialBalance:       cfg.PersistInitialBalance,
+        InitialBalanceStateDir:      cfg.InitialBalanceStateDir,
 		BTCETHLeverage:        leverage.BTCETHLeverage,  // 浣跨敤閰嶇疆鐨勬潬鏉嗗€嶆暟
 		AltcoinLeverage:       leverage.AltcoinLeverage, // 浣跨敤閰嶇疆鐨勬潬鏉嗗€嶆暟
 		MaxDailyLoss:          maxDailyLoss,

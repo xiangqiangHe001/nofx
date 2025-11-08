@@ -101,11 +101,11 @@ func GetFullDecision(ctx *Context) (*FullDecision, error) {
 	systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
 	userPrompt := buildUserPrompt(ctx)
 
-    // 3. 调用AI API（使用 system + user prompt）
-    aiResponse, err := mcp.CallWithMessages(systemPrompt, userPrompt)
-    if err != nil {
-        return nil, fmt.Errorf("failed to call AI API: %w", err)
-    }
+	// 3. 调用AI API（使用 system + user prompt）
+	aiResponse, err := mcp.CallWithMessages(systemPrompt, userPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call AI API: %w", err)
+	}
 
 	// 4. 解析AI响应
 	decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
@@ -115,35 +115,35 @@ func GetFullDecision(ctx *Context) (*FullDecision, error) {
 
 	decision.Timestamp = time.Now()
 	decision.UserPrompt = userPrompt // 保存输入prompt
-    return decision, nil
+	return decision, nil
 }
 
 // GetFullDecisionWithClient 使用指定的AI客户端获取完整交易决策（推荐，避免全局冲突）
 func GetFullDecisionWithClient(client *mcp.Client, ctx *Context) (*FullDecision, error) {
-    // 1. 为所有币种获取市场数据
-    if err := fetchMarketDataForContext(ctx); err != nil {
-        return nil, fmt.Errorf("failed to fetch market data: %w", err)
-    }
+	// 1. 为所有币种获取市场数据
+	if err := fetchMarketDataForContext(ctx); err != nil {
+		return nil, fmt.Errorf("failed to fetch market data: %w", err)
+	}
 
-    // 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
-    systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
-    userPrompt := buildUserPrompt(ctx)
+	// 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
+	systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+	userPrompt := buildUserPrompt(ctx)
 
-    // 3. 调用AI API（使用 system + user prompt）——使用传入client避免defaultClient被其他trader覆盖
-    aiResponse, err := client.CallWithMessages(systemPrompt, userPrompt)
-    if err != nil {
-        return nil, fmt.Errorf("failed to call AI API: %w", err)
-    }
+	// 3. 调用AI API（使用 system + user prompt）——使用传入client避免defaultClient被其他trader覆盖
+	aiResponse, err := client.CallWithMessages(systemPrompt, userPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to call AI API: %w", err)
+	}
 
-    // 4. 解析AI响应
-    decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
-    if err != nil {
-        return nil, fmt.Errorf("failed to parse AI response: %w", err)
-    }
+	// 4. 解析AI响应
+	decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse AI response: %w", err)
+	}
 
-    decision.Timestamp = time.Now()
-    decision.UserPrompt = userPrompt // 保存输入prompt
-    return decision, nil
+	decision.Timestamp = time.Now()
+	decision.UserPrompt = userPrompt // 保存输入prompt
+	return decision, nil
 }
 
 // fetchMarketDataForContext 为上下文中的所有币种获取市场数据和OI数据
@@ -230,7 +230,7 @@ func calculateMaxCandidates(ctx *Context) int {
 
 // buildSystemPrompt 构建 System Prompt（固定规则，可缓存）
 func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage int) string {
-    var sb strings.Builder
+	var sb strings.Builder
 
 	sb.WriteString("您是一名专业币圈交易员王百万 ，现在家道中落现在需要稳健的翻身方法，遂利用趋势回调+动能确认策略做虚拟货币，主要做BTC、ETH、SOL。\n\n")
 
@@ -238,7 +238,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 
 	sb.WriteString("目标：在加密货币市场实现稳定盈利，通过趋势确认+动量共振捕捉高概率入场点，严格风险管理，每单固定10%盈利目标。\n\n")
 
-	sb.WriteString("适用市场：加密货币（主攻BTC、ETH、SOL、DOGE、OKB、BNB、XRP）。\n\n")
+	sb.WriteString("适用市场：加密货币（主攻BTC、ETH、SOL、DOGE、OKB、BNB）。\n\n")
 
 	sb.WriteString("时间框架：1小时图（入场）+ 4小时图（趋势过滤）\n\n")
 
@@ -246,17 +246,17 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 
 	sb.WriteString("二、多时间框架分析体系\n\n")
 
-    sb.WriteString("趋势判断（4小时图 - 缠论笔段概念）：\n")
-    sb.WriteString("上涨趋势：连续3根4小时K线收盘在EMA(20)上方，且EMA(20)斜率向上\n")
-    sb.WriteString("下跌趋势：连续3根4小时K线收盘在EMA(20)下方，且EMA(20)斜率向下\n")
-    sb.WriteString("震荡趋势：价格在EMA(20)上下穿插，布林带(20,2)收窄\n\n")
+	sb.WriteString("趋势判断（4小时图 - 缠论笔段概念）：\n")
+	sb.WriteString("上涨趋势：连续3根4小时K线收盘在EMA(20)上方，且EMA(20)斜率向上\n")
+	sb.WriteString("下跌趋势：连续3根4小时K线收盘在EMA(20)下方，且EMA(20)斜率向下\n")
+	sb.WriteString("震荡趋势：价格在EMA(20)上下穿插，布林带(20,2)收窄\n\n")
 
-    sb.WriteString("动量分析（1小时图 - 维科夫量价原理）：\n\n")
+	sb.WriteString("动量分析（1小时图 - 维科夫量价原理）：\n\n")
 
-    sb.WriteString("上涨趋势中：缩量回调至支撑 + 放量突破前高 = 做多信号\n")
-    sb.WriteString("下跌趋势中：缩量反弹至阻力 + 放量跌破前低 = 做空信号\n\n")
+	sb.WriteString("上涨趋势中：缩量回调至支撑 + 放量突破前高 = 做多信号\n")
+	sb.WriteString("下跌趋势中：缩量反弹至阻力 + 放量跌破前低 = 做空信号\n\n")
 
-    sb.WriteString("三、具体交易信号体系\n\n")
+	sb.WriteString("三、具体交易信号体系\n\n")
 
 	sb.WriteString("做多信号（需同时满足）：\n\n")
 
@@ -265,10 +265,10 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString("做空信号（需同时满足）：\n\n")
 	sb.WriteString("趋势层面（4小时）：4小时EMA(20)方向向下，价格在其下方运行4小时布林带中轨向下倾斜最近一个4小时分型为顶分型（缠论概念）入场层面（1小时）：价格反弹至布林带上轨/中轨或斐波那契38.2%-50%阻力位RMI(14)从超买区(>70)向下回落，MFI(14)显示资金流出成交量在阻力位萎缩，跌破时放大，出现看跌反转形态\n\n")
 
-    sb.WriteString("精准入场与出场策略\n\n")
-    sb.WriteString("入场时机：做多：价格突破前一根1小时K线高点，且成交量放大；做空：价格跌破前一根1小时K线低点，且成交量放大。\n")
-    sb.WriteString("止损策略：主要止损：入场价下方5-7%（做多）/上方5-7%（做空）；逻辑止损：近期摆动低点下方0.5%（做多）/高点上方0.5%（做空）；时间止损：入场后4-5根K线内未达预期走势，平仓离场\n")
-    sb.WriteString("止盈策略：固定目标：入场价的±10%；移动止损：盈利达5%后，止损移动至保本位\n\n")
+	sb.WriteString("精准入场与出场策略\n\n")
+	sb.WriteString("入场时机：做多：价格突破前一根1小时K线高点，且成交量放大；做空：价格跌破前一根1小时K线低点，且成交量放大。\n")
+	sb.WriteString("止损策略：主要止损：入场价下方5-7%（做多）/上方5-7%（做空）；逻辑止损：近期摆动低点下方0.5%（做多）/高点上方0.5%（做空）；时间止损：入场后4-5根K线内未达预期走势，平仓离场\n")
+	sb.WriteString("止盈策略：固定目标：入场价的±10%；移动止损：盈利达5%后，止损移动至保本位\n\n")
 
 	sb.WriteString("五、风险控制系统\n\n")
 	sb.WriteString("每日最大交易次数：3次连续亏损后：亏损2单后暂停交易4小时盈利保护：当日盈利达到15%后停止交易\n\n")
@@ -299,9 +299,6 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 	sb.WriteString(fmt.Sprintf("- 杠杆原则：BTC/ETH 使用 %dx，其他币使用 %dx\n", btcEthLeverage, altcoinLeverage))
 	// sb.WriteString(fmt.Sprintf("- 风险预算：单笔 risk_usd ≤ %.0f（不超过净值的2%%），position_size_usd 与余额匹配\n", accountEquity*0.02))
 	sb.WriteString("- 若止损/止盈要求与风险预算无法同时满足，则输出 []，并在思维链说明原因\n\n")
-
-
-
 
 	return sb.String()
 }

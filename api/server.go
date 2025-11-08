@@ -5,6 +5,7 @@ import (
     "log"
     "net/http"
     "nofx/manager"
+    "nofx/trader"
     "sort"
     "strconv"
     "time"
@@ -131,10 +132,12 @@ func (s *Server) setupRoutes() {
 
 		// 指定trader的数据（使用query参数 ?trader_id=xxx）
 		api.GET("/status", s.handleStatus)
-		api.GET("/account", s.handleAccount)
-		api.GET("/positions", s.handlePositions)
+        api.GET("/account", s.handleAccount)
+        api.GET("/positions", s.handlePositions)
         api.GET("/decisions", s.handleDecisions)
         api.GET("/decisions/latest", s.handleLatestDecisions)
+        // 动态设置初始资金基线（用于存取款后的基线校准）
+        api.POST("/initial-balance", s.handleSetInitialBalance)
         // 平仓明细日志（过滤 close_* 动作）
         api.GET("/close-logs", s.handleCloseLogs)
 		api.GET("/statistics", s.handleStatistics)
@@ -279,10 +282,12 @@ func (s *Server) handleAiCloseThenOpen(c *gin.Context) {
 }
 
 // handleManualOpen 手动开仓（用于测试）
-// JSON Body: {"trader_id":"...","action":"long|short","symbol":"BTCUSDT","usd":100.0,"leverage":10}
+// JSON Body: {"trader_id":"...","trader_idx":0,"action":"long|short","symbol":"BTCUSDT","usd":100.0,"leverage":10}
+// 说明：trader_id 与 trader_idx 可二选一；若同时提供，优先使用 trader_id。trader_idx 为 0-based 索引。
 func (s *Server) handleManualOpen(c *gin.Context) {
     type Req struct {
         TraderID string  `json:"trader_id"`
+        TraderIdx *int   `json:"trader_idx"`
         Action   string  `json:"action"`
         Symbol   string  `json:"symbol"`
         USD      float64 `json:"usd"`
@@ -293,12 +298,25 @@ func (s *Server) handleManualOpen(c *gin.Context) {
         c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json: " + err.Error()})
         return
     }
-    if req.TraderID == "" || req.Symbol == "" || req.Action == "" || req.USD <= 0 || req.Leverage <= 0 {
+    // 解析 Trader 标识：优先使用 trader_id；如果为空且提供了 trader_idx，则按索引选择
+    var traderID string
+    if req.TraderID != "" {
+        traderID = req.TraderID
+    } else if req.TraderIdx != nil {
+        ids := s.traderManager.GetTraderIDs()
+        if *req.TraderIdx < 0 || *req.TraderIdx >= len(ids) {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "trader_idx 越界或无效"})
+            return
+        }
+        traderID = ids[*req.TraderIdx]
+    }
+
+    if traderID == "" || req.Symbol == "" || req.Action == "" || req.USD <= 0 || req.Leverage <= 0 {
         c.JSON(http.StatusBadRequest, gin.H{"error": "缺少必要参数或参数不合法"})
         return
     }
 
-    t, err := s.traderManager.GetTrader(req.TraderID)
+    t, err := s.traderManager.GetTrader(traderID)
     if err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
         return
@@ -315,6 +333,15 @@ func (s *Server) handleManualOpen(c *gin.Context) {
         return
     }
     if err != nil {
+        // 若为结构化订单错误，返回详细信息以便前端渲染
+        if oe, ok := err.(*trader.OrderError); ok {
+            c.JSON(http.StatusBadRequest, gin.H{
+                "error":        oe.Message,
+                "order_error":  oe,
+                "success":      false,
+            })
+            return
+        }
         c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
         return
     }
@@ -322,10 +349,12 @@ func (s *Server) handleManualOpen(c *gin.Context) {
 }
 
 // handleManualClose 手动平仓（用于测试）
-// JSON Body: {"trader_id":"...","side":"long|short","symbol":"BTCUSDT"}
+// JSON Body: {"trader_id":"...","trader_idx":0,"side":"long|short","symbol":"BTCUSDT"}
+// 说明：trader_id 与 trader_idx 可二选一；若同时提供，优先使用 trader_id。trader_idx 为 0-based 索引。
 func (s *Server) handleManualClose(c *gin.Context) {
     type Req struct {
         TraderID string `json:"trader_id"`
+        TraderIdx *int  `json:"trader_idx"`
         Side     string `json:"side"`
         Symbol   string `json:"symbol"`
     }
@@ -334,12 +363,25 @@ func (s *Server) handleManualClose(c *gin.Context) {
         c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json: " + err.Error()})
         return
     }
-    if req.TraderID == "" || req.Symbol == "" || req.Side == "" {
+    // 解析 Trader 标识：优先使用 trader_id；如果为空且提供了 trader_idx，则按索引选择
+    var traderID string
+    if req.TraderID != "" {
+        traderID = req.TraderID
+    } else if req.TraderIdx != nil {
+        ids := s.traderManager.GetTraderIDs()
+        if *req.TraderIdx < 0 || *req.TraderIdx >= len(ids) {
+            c.JSON(http.StatusBadRequest, gin.H{"error": "trader_idx 越界或无效"})
+            return
+        }
+        traderID = ids[*req.TraderIdx]
+    }
+
+    if traderID == "" || req.Symbol == "" || req.Side == "" {
         c.JSON(http.StatusBadRequest, gin.H{"error": "缺少必要参数或参数不合法"})
         return
     }
 
-    t, err := s.traderManager.GetTrader(req.TraderID)
+    t, err := s.traderManager.GetTrader(traderID)
     if err != nil {
         c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
         return
@@ -411,6 +453,34 @@ func (s *Server) handleAccount(c *gin.Context) {
 		account["total_pnl"],
 		account["total_pnl_pct"])
 	c.JSON(http.StatusOK, account)
+}
+
+// handleSetInitialBalance 设置指定 Trader 的初始资金基线
+// JSON Body: {"trader_id":"何百万 okx_deepseek","value":50}
+func (s *Server) handleSetInitialBalance(c *gin.Context) {
+    type Req struct {
+        TraderID string  `json:"trader_id"`
+        Value    float64 `json:"value"`
+    }
+    var req Req
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json: " + err.Error()})
+        return
+    }
+    if req.TraderID == "" || req.Value <= 0 {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id 不能为空且 value 必须大于 0"})
+        return
+    }
+
+    t, err := s.traderManager.GetTrader(req.TraderID)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+
+    t.SetInitialBalance(req.Value)
+    log.Printf("⚙️ 已设置初始资金基线 [%s] = %.2f", t.GetName(), req.Value)
+    c.JSON(http.StatusOK, gin.H{"success": true, "trader_id": req.TraderID, "initial_balance": req.Value})
 }
 
 // handlePositions 持仓列表

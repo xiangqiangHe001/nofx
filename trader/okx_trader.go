@@ -39,6 +39,11 @@ type OKXTrader struct {
     // 持仓模式缓存（long_short_mode 或 net_mode）
     posModeCache      string
     posModeCacheTime  time.Time
+
+    // 失败节流与统计
+    failureMu   sync.Mutex
+    lastFail    map[string]time.Time // key: symbol|side
+    failCount   map[string]int       // key: symbol|side
 }
 
 // NewOKXTrader 创建OKX交易器
@@ -55,6 +60,8 @@ func NewOKXTrader(apiKey, secretKey, passphrase string) (*OKXTrader, error) {
         ctValCache: make(map[string]float64),
         lotSzCache: make(map[string]float64),
         minSzCache: make(map[string]float64),
+        lastFail:   make(map[string]time.Time),
+        failCount:  make(map[string]int),
     }, nil
 }
 
@@ -217,35 +224,22 @@ func (o *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map
     if o.apiKey == "" || o.secretKey == "" || o.passphrase == "" {
         return nil, fmt.Errorf("OKX未配置API密钥")
     }
-    instID := toOKXInstID(symbol)
+    // 节流：检测近期失败是否需要冷却
+    if err := o.throttleIfNeeded(symbol, "long"); err != nil {
+        return nil, err
+    }
+
     // 设置杠杆（失败不阻断开仓，继续尝试下单）
     if err := o.SetLeverage(symbol, leverage); err != nil {
         log.Printf("⚠️ 设置杠杆失败(继续尝试下单): %v", err)
     }
-    // 避免后台杠杆变更存在传播延迟，短暂等待后再下单
     time.Sleep(2500 * time.Millisecond)
 
-    // 获取合约规格（面值、最小张数、步进张数）并校验
-    ctVal, lotSz, minSz, exists := o.getInstrumentSpec(instID)
-    if !exists {
-        return nil, fmt.Errorf("合约不存在或不支持: %s", instID)
+    // 保证金/余额预检与动态缩量，准备合法下单尺寸
+    instID, sz, usedQty, _, requiredMargin, avail, err := o.precheckAndPrepareOrder(symbol, "long", quantity, leverage)
+    if err != nil {
+        return nil, err
     }
-    if ctVal <= 0 {
-        ctVal = 1.0
-    }
-    // 计算合约张数，并按 lotSz 向下取整到合法步进
-    contracts := quantity / ctVal
-    if contracts <= 0 {
-        return nil, fmt.Errorf("下单数量过小")
-    }
-    if lotSz > 0 {
-        steps := math.Floor(contracts/lotSz)
-        contracts = steps * lotSz
-    }
-    if contracts < minSz || contracts <= 0 {
-        return nil, fmt.Errorf("下单数量过小，最小张数为 %.6f", minSz)
-    }
-    sz := fmt.Sprintf("%.6f", contracts)
 
     // 检查持仓模式（双向/净持仓），决定是否传 posSide
     posMode := o.getPositionMode()
@@ -287,6 +281,24 @@ func (o *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map
                 o.posModeCacheTime = time.Time{}
                 log.Printf("⚠️ 检测到账户模式错误51010，已清除持仓模式缓存，请重新尝试下单")
             }
+            // 资金不足错误：返回结构化错误并节流
+            if resp.Data[0].SCode == "51008" {
+                friendly, suggestion := MapOkxError(resp.Data[0].SCode, resp.Data[0].SMsg)
+                o.recordFailure(symbol, "long")
+                return nil, &OrderError{
+                    Exchange:          "OKX",
+                    Symbol:            symbol,
+                    Side:              "open_long",
+                    Quantity:          usedQty,
+                    Leverage:          leverage,
+                    RequiredMarginUSD: requiredMargin,
+                    AvailableUSD:      avail,
+                    Code:              resp.Data[0].SCode,
+                    Message:           resp.Data[0].SMsg,
+                    Friendly:          friendly,
+                    Suggestion:        suggestion,
+                }
+            }
         }
         // 针对 51000/51010 执行一次自动重试：刷新持仓模式 -> 重新设置杠杆 -> 延时 -> 重新下单
         if resp.Code == "51000" || (len(resp.Data) > 0 && (resp.Data[0].SCode == "51000" || resp.Data[0].SCode == "51010")) {
@@ -319,6 +331,7 @@ func (o *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map
                 }
             }
         }
+        o.recordFailure(symbol, "long")
         return nil, fmt.Errorf("OKX下单失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
     }
     if len(resp.Data) > 0 && resp.Data[0].SCode != "" && resp.Data[0].SCode != "0" {
@@ -352,6 +365,25 @@ func (o *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map
                 }
             }
         }
+        // 资金不足错误：返回结构化错误并节流
+        if resp.Data[0].SCode == "51008" {
+            friendly, suggestion := MapOkxError(resp.Data[0].SCode, resp.Data[0].SMsg)
+            o.recordFailure(symbol, "long")
+            return nil, &OrderError{
+                Exchange:          "OKX",
+                Symbol:            symbol,
+                Side:              "open_long",
+                Quantity:          usedQty,
+                Leverage:          leverage,
+                RequiredMarginUSD: requiredMargin,
+                AvailableUSD:      avail,
+                Code:              resp.Data[0].SCode,
+                Message:           resp.Data[0].SMsg,
+                Friendly:          friendly,
+                Suggestion:        suggestion,
+            }
+        }
+        o.recordFailure(symbol, "long")
         return nil, fmt.Errorf("OKX下单失败: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
     }
     result := map[string]interface{}{"orderId": resp.Data[0].OrdID}
@@ -363,30 +395,22 @@ func (o *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
     if o.apiKey == "" || o.secretKey == "" || o.passphrase == "" {
         return nil, fmt.Errorf("OKX未配置API密钥")
     }
-    instID := toOKXInstID(symbol)
+    // 节流：检测近期失败是否需要冷却
+    if err := o.throttleIfNeeded(symbol, "short"); err != nil {
+        return nil, err
+    }
+
     // 设置杠杆（失败不阻断开仓，继续尝试下单）
     if err := o.SetLeverage(symbol, leverage); err != nil {
         log.Printf("⚠️ 设置杠杆失败(继续尝试下单): %v", err)
     }
-    // 避免后台杠杆变更存在传播延迟，短暂等待后再下单
     time.Sleep(2500 * time.Millisecond)
 
-    // 获取合约规格并校验
-    ctVal, lotSz, minSz, exists := o.getInstrumentSpec(instID)
-    if !exists {
-        return nil, fmt.Errorf("合约不存在或不支持: %s", instID)
+    // 保证金/余额预检与动态缩量，准备合法下单尺寸
+    instID, sz, usedQty, _, requiredMargin, avail, err := o.precheckAndPrepareOrder(symbol, "short", quantity, leverage)
+    if err != nil {
+        return nil, err
     }
-    if ctVal <= 0 { ctVal = 1.0 }
-    contracts := quantity / ctVal
-    if contracts <= 0 { return nil, fmt.Errorf("下单数量过小") }
-    if lotSz > 0 {
-        steps := math.Floor(contracts/lotSz)
-        contracts = steps * lotSz
-    }
-    if contracts < minSz || contracts <= 0 {
-        return nil, fmt.Errorf("下单数量过小，最小张数为 %.6f", minSz)
-    }
-    sz := fmt.Sprintf("%.6f", contracts)
 
     // 检查持仓模式（双向/净持仓），决定是否传 posSide
     posMode := o.getPositionMode()
@@ -425,6 +449,23 @@ func (o *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
                 o.posModeCacheTime = time.Time{}
                 log.Printf("⚠️ 检测到账户模式错误51010，已清除持仓模式缓存，请重新尝试下单")
             }
+            if resp.Data[0].SCode == "51008" {
+                friendly, suggestion := MapOkxError(resp.Data[0].SCode, resp.Data[0].SMsg)
+                o.recordFailure(symbol, "short")
+                return nil, &OrderError{
+                    Exchange:          "OKX",
+                    Symbol:            symbol,
+                    Side:              "open_short",
+                    Quantity:          usedQty,
+                    Leverage:          leverage,
+                    RequiredMarginUSD: requiredMargin,
+                    AvailableUSD:      avail,
+                    Code:              resp.Data[0].SCode,
+                    Message:           resp.Data[0].SMsg,
+                    Friendly:          friendly,
+                    Suggestion:        suggestion,
+                }
+            }
         }
         // 针对 51000/51010 执行一次自动重试：刷新持仓模式 -> 重新设置杠杆 -> 延时 -> 重新下单
         if resp.Code == "51000" || (len(resp.Data) > 0 && (resp.Data[0].SCode == "51000" || resp.Data[0].SCode == "51010")) {
@@ -459,6 +500,7 @@ func (o *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
                 }
             }
         }
+        o.recordFailure(symbol, "short")
         return nil, fmt.Errorf("OKX下单失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
     }
     if len(resp.Data) > 0 && resp.Data[0].SCode != "" && resp.Data[0].SCode != "0" {
@@ -493,10 +535,165 @@ func (o *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
                 }
             }
         }
+        if resp.Data[0].SCode == "51008" {
+            friendly, suggestion := MapOkxError(resp.Data[0].SCode, resp.Data[0].SMsg)
+            o.recordFailure(symbol, "short")
+            return nil, &OrderError{
+                Exchange:          "OKX",
+                Symbol:            symbol,
+                Side:              "open_short",
+                Quantity:          usedQty,
+                Leverage:          leverage,
+                RequiredMarginUSD: requiredMargin,
+                AvailableUSD:      avail,
+                Code:              resp.Data[0].SCode,
+                Message:           resp.Data[0].SMsg,
+                Friendly:          friendly,
+                Suggestion:        suggestion,
+            }
+        }
+        o.recordFailure(symbol, "short")
         return nil, fmt.Errorf("OKX下单失败: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
     }
     return map[string]interface{}{"orderId": resp.Data[0].OrdID}, nil
 }
+
+// ===== 预检、缩量与节流辅助 =====
+
+// precheckAndPrepareOrder 执行保证金预检，必要时动态缩量，并返回合法的下单尺寸字符串
+func (o *OKXTrader) precheckAndPrepareOrder(symbol string, side string, quantity float64, leverage int) (string, string, float64, float64, float64, float64, error) {
+    instID := toOKXInstID(symbol)
+    // 规格与张数计算
+    ctVal, lotSz, minSz, exists := o.getInstrumentSpec(instID)
+    if !exists {
+        return "", "", 0, 0, 0, 0, fmt.Errorf("合约不存在或不支持: %s", instID)
+    }
+    if ctVal <= 0 {
+        ctVal = 1.0
+    }
+    contracts := quantity / ctVal
+    if contracts <= 0 {
+        return "", "", 0, 0, 0, 0, fmt.Errorf("下单数量过小")
+    }
+    // 当前价格与保证金需求
+    price, err := o.GetMarketPrice(symbol)
+    if err != nil || price <= 0 {
+        return "", "", 0, 0, 0, 0, fmt.Errorf("获取价格失败: %v", err)
+    }
+    requiredMargin := (quantity * price) / float64(leverage)
+    // 预留手续费与滑点缓冲
+    requiredMargin *= 1.002
+    // 账户可用余额
+    bal, err := o.GetBalance()
+    if err != nil {
+        return "", "", 0, 0, 0, 0, fmt.Errorf("获取账户余额失败: %v", err)
+    }
+    avail := 0.0
+    if v, ok := bal["availableBalance"].(float64); ok {
+        avail = v
+    }
+
+    // 动态缩量以适配可用余额
+    if avail < requiredMargin {
+        maxUSD := avail * float64(leverage)
+        // 安全折扣，避免再次因小数/步进导致失败
+        maxUSD *= 0.98
+        newQty := maxUSD / price
+        if newQty <= 0 {
+            friendly, suggestion := MapOkxError("51008", "insufficient margin")
+            return "", "", 0, price, requiredMargin, avail, &OrderError{
+                Exchange:          "OKX",
+                Symbol:            symbol,
+                Side:              "open_" + side,
+                Quantity:          quantity,
+                Leverage:          leverage,
+                RequiredMarginUSD: requiredMargin,
+                AvailableUSD:      avail,
+                Code:              "51008",
+                Message:           "insufficient margin",
+                Friendly:          friendly,
+                Suggestion:        suggestion,
+            }
+        }
+        // 重新计算合约张数并向下取整到合法步进
+        contracts = newQty / ctVal
+        if lotSz > 0 {
+            steps := math.Floor(contracts/lotSz)
+            contracts = steps * lotSz
+        }
+        if contracts < minSz || contracts <= 0 {
+            friendly, suggestion := MapOkxError("51008", "insufficient margin for min size")
+            return "", "", 0, price, requiredMargin, avail, &OrderError{
+                Exchange:          "OKX",
+                Symbol:            symbol,
+                Side:              "open_" + side,
+                Quantity:          quantity,
+                Leverage:          leverage,
+                RequiredMarginUSD: requiredMargin,
+                AvailableUSD:      avail,
+                Code:              "51008",
+                Message:           "insufficient margin for min size",
+                Friendly:          friendly,
+                Suggestion:        suggestion,
+            }
+        }
+    }
+
+    // 步进/最小张数校验（无论是否缩量）
+    if lotSz > 0 {
+        steps := math.Floor(contracts/lotSz)
+        contracts = steps * lotSz
+    }
+    if contracts < minSz || contracts <= 0 {
+        return "", "", 0, price, requiredMargin, avail, fmt.Errorf("下单数量过小，最小张数为 %.6f", minSz)
+    }
+    sz := fmt.Sprintf("%.6f", contracts)
+    usedQty := contracts * ctVal
+    return instID, sz, usedQty, price, requiredMargin, avail, nil
+}
+
+// throttleIfNeeded 如果近期失败过多，则返回节流错误
+func (o *OKXTrader) throttleIfNeeded(symbol, side string) error {
+    key := symbol + "|" + side
+    o.failureMu.Lock()
+    defer o.failureMu.Unlock()
+    last, ok := o.lastFail[key]
+    if !ok {
+        return nil
+    }
+    count := o.failCount[key]
+    cooldown := 60 * time.Second
+    if count >= 3 {
+        cooldown = 5 * time.Minute
+    }
+    if time.Since(last) < cooldown {
+        remaining := cooldown - time.Since(last)
+        friendly := "近期该交易对下单连续失败，已进入冷却期。"
+        suggestion := fmt.Sprintf("请等待 %.0f 秒后重试，或降低下单数量。", remaining.Seconds())
+        return &OrderError{
+            Exchange:   "OKX",
+            Symbol:     symbol,
+            Side:       "open_" + side,
+            Quantity:   0,
+            Leverage:   0,
+            Code:       "THROTTLE",
+            Message:    "cooldown",
+            Friendly:   friendly,
+            Suggestion: suggestion,
+        }
+    }
+    return nil
+}
+
+// recordFailure 记录一次失败，用于节流
+func (o *OKXTrader) recordFailure(symbol, side string) {
+    key := symbol + "|" + side
+    o.failureMu.Lock()
+    defer o.failureMu.Unlock()
+    o.lastFail[key] = time.Now()
+    o.failCount[key] = o.failCount[key] + 1
+}
+
 
 // CloseLong 平多仓
 func (o *OKXTrader) CloseLong(symbol string, quantity float64) (map[string]interface{}, error) {

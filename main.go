@@ -1,16 +1,17 @@
 package main
 
 import (
-	"fmt"
-	"log"
-	"nofx/api"
-	"nofx/config"
-	"nofx/manager"
-	"nofx/pool"
-	"os"
-	"os/signal"
-	"strings"
-	"syscall"
+    "fmt"
+    "log"
+    "nofx/api"
+    "nofx/config"
+    "nofx/manager"
+    "nofx/pool"
+    "os"
+    "os/signal"
+    "strconv"
+    "strings"
+    "syscall"
 )
 
 func main() {
@@ -112,8 +113,15 @@ func main() {
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Println()
 
-	// 创建并启动API服务器
-	apiServer := api.NewServer(traderManager, cfg.APIServerPort)
+    // 创建并启动API服务器（支持环境变量 API_PORT 覆盖）
+    port := cfg.APIServerPort
+    if p := os.Getenv("API_PORT"); p != "" {
+        if v, e := strconv.Atoi(p); e == nil && v > 0 {
+            port = v
+            log.Printf("⚙️ 使用环境变量 API_PORT=%d 覆盖配置端口", port)
+        }
+    }
+    apiServer := api.NewServer(traderManager, port)
 	go func() {
 		if err := apiServer.Start(); err != nil {
 			log.Printf("❌ API服务器错误: %v", err)

@@ -5,11 +5,14 @@ import (
     "fmt"
     "strconv"
     "log"
+    "math"
     "nofx/decision"
     "nofx/logger"
     "nofx/market"
     "nofx/mcp"
 	"nofx/pool"
+    "os"
+    "path/filepath"
 	"strings"
 	"time"
 )
@@ -60,6 +63,10 @@ type AutoTraderConfig struct {
 
 	// 账户配置
 	InitialBalance float64 // 初始金额（用于计算盈亏，需手动设置）
+    AutoCalibrateInitialBalance bool    // 是否自动对齐基线（含入金校准）
+    CalibrationThreshold        float64 // 触发自动校准的最小差额（USDT）
+    PersistInitialBalance       bool    // 是否持久化初始余额到本地文件
+    InitialBalanceStateDir      string  // 初始余额状态文件目录
 
 	// 杠杆配置
 	BTCETHLeverage  int // BTC和ETH的杠杆倍数
@@ -91,6 +98,11 @@ type AutoTrader struct {
     callCount            int                       // AI调用次数
     positionFirstSeenTime map[string]int64         // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
     executionEnabled     bool                      // 是否启用自动执行
+
+    // 基线自动对齐与持久化
+    autoCalibrateBaseline bool
+    calibrationThreshold  float64
+    baselineStatePath     string
 }
 
 // NewAutoTrader 创建自动交易器
@@ -172,7 +184,7 @@ case "binance":
 	logDir := fmt.Sprintf("decision_logs/%s", config.ID)
 	decisionLogger := logger.NewDecisionLogger(logDir)
 
-    return &AutoTrader{
+    at := &AutoTrader{
         id:                   config.ID,
         name:                 config.Name,
         aiModel:              config.AIModel,
@@ -188,7 +200,22 @@ case "binance":
         isRunning:            false,
         positionFirstSeenTime: make(map[string]int64),
         executionEnabled:     true,
-    }, nil
+        autoCalibrateBaseline: config.AutoCalibrateInitialBalance,
+        calibrationThreshold:  config.CalibrationThreshold,
+    }
+
+    // 初始余额持久化加载（可选）
+    if config.PersistInitialBalance && config.InitialBalanceStateDir != "" {
+        safeID := strings.ReplaceAll(config.ID, " ", "_")
+        fileName := fmt.Sprintf("initial_balance_%s.json", safeID)
+        at.baselineStatePath = filepath.Join(config.InitialBalanceStateDir, fileName)
+        if v, err := at.loadInitialBalanceFromFile(); err == nil && v > 0 {
+            at.initialBalance = v
+            log.Printf("🧷 [%s] 读取持久化初始余额: %.2f", config.Name, v)
+        }
+    }
+
+    return at, nil
 }
 
 // Run 运行自动交易主循环
@@ -1360,8 +1387,8 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 		availableBalance = avail
 	}
 
-	// Total Equity = 钱包余额 + 未实现盈亏
-	totalEquity := totalWalletBalance + totalUnrealizedProfit
+    // Total Equity = 钱包余额 + 未实现盈亏
+    totalEquity := totalWalletBalance + totalUnrealizedProfit
 
 	// 获取持仓计算总保证金
     positions, err := at.trader.GetPositions()
@@ -1389,7 +1416,17 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 		totalMarginUsed += marginUsed
 	}
 
-	totalPnL := totalEquity - at.initialBalance
+    // 自动基线对齐：在空仓且差额超过阈值时，将初始余额对齐到当前钱包余额
+    if at.autoCalibrateBaseline && len(positions) == 0 && at.calibrationThreshold > 0 {
+        if totalWalletBalance > 0 && math.Abs(totalWalletBalance-at.initialBalance) >= at.calibrationThreshold {
+            old := at.initialBalance
+            at.initialBalance = totalWalletBalance
+            log.Printf("🔧 [%s] 自动校准初始资金基线: %.2f -> %.2f (空仓账户余额对齐)", at.GetName(), old, at.initialBalance)
+            _ = at.saveInitialBalanceToFile()
+        }
+    }
+
+    totalPnL := totalEquity - at.initialBalance
 	totalPnLPct := 0.0
 	if at.initialBalance > 0 {
 		totalPnLPct = (totalPnL / at.initialBalance) * 100
@@ -1419,6 +1456,14 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 		"margin_used":     totalMarginUsed, // 保证金占用
 		"margin_used_pct": marginUsedPct,   // 保证金使用率
 	}, nil
+}
+
+// SetInitialBalance 动态设置初始资金基线（用于存取款后的基线校准）
+func (at *AutoTrader) SetInitialBalance(v float64) {
+    if v > 0 {
+        at.initialBalance = v
+        _ = at.saveInitialBalanceToFile()
+    }
 }
 
 // GetPositions 获取持仓列表（用于API）
@@ -1510,4 +1555,47 @@ func sortDecisionsByPriority(decisions []decision.Decision) []decision.Decision 
 	}
 
 	return sorted
+}
+
+// 持久化：保存初始余额到文件（可选）
+func (at *AutoTrader) saveInitialBalanceToFile() error {
+    if at.baselineStatePath == "" {
+        return nil
+    }
+    if err := os.MkdirAll(filepath.Dir(at.baselineStatePath), 0o755); err != nil {
+        return err
+    }
+    data := map[string]interface{}{
+        "initial_balance": at.initialBalance,
+        "updated_at":      time.Now().Unix(),
+    }
+    b, _ := json.MarshalIndent(data, "", "  ")
+    return os.WriteFile(at.baselineStatePath, b, 0o644)
+}
+
+// 持久化：读取初始余额文件
+func (at *AutoTrader) loadInitialBalanceFromFile() (float64, error) {
+    if at.baselineStatePath == "" {
+        return 0, fmt.Errorf("no state path")
+    }
+    b, err := os.ReadFile(at.baselineStatePath)
+    if err != nil {
+        return 0, err
+    }
+    var m map[string]interface{}
+    if err := json.Unmarshal(b, &m); err != nil {
+        return 0, err
+    }
+    if v, ok := m["initial_balance"].(float64); ok {
+        return v, nil
+    }
+    if vInt, ok := m["initial_balance"].(int); ok {
+        return float64(vInt), nil
+    }
+    if vStr, ok := m["initial_balance"].(string); ok {
+        if f, err := strconv.ParseFloat(vStr, 64); err == nil {
+            return f, nil
+        }
+    }
+    return 0, fmt.Errorf("invalid state file")
 }

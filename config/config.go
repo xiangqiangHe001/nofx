@@ -50,6 +50,12 @@ type TraderConfig struct {
 
 	InitialBalance      float64 `json:"initial_balance"`
 	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
+
+    // 初始资金基线自动对齐与持久化（可选）
+    AutoCalibrateInitialBalance bool    `json:"auto_calibrate_initial_balance,omitempty"`
+    CalibrationThreshold        float64 `json:"calibration_threshold,omitempty"`
+    PersistInitialBalance       bool    `json:"persist_initial_balance,omitempty"`
+    InitialBalanceStateDir      string  `json:"initial_balance_state_dir,omitempty"`
 }
 
 // LeverageConfig 鏉犳潌閰嶇疆
@@ -185,6 +191,11 @@ func (c *Config) Validate() error {
         }
         if trader.ScanIntervalMinutes <= 0 {
             trader.ScanIntervalMinutes = 3
+        }
+
+        // 设置自动校准阈值默认值
+        if trader.AutoCalibrateInitialBalance && trader.CalibrationThreshold <= 0 {
+            trader.CalibrationThreshold = 1.0
         }
     }
 
