@@ -1,0 +1,14 @@
+# type(scope): subject
+#
+# Allowed types: feat, fix, chore, refactor, docs, perf, test, build, ci, style
+# Scope: optional; e.g. trader, api, logger, web
+# Subject: imperative, concise, lowercase, no trailing period
+
+# Body (optional)
+# - briefly explain what changed and why
+# - if multiple actions, separate with commas or semicolons
+# - include context that helps reviewers understand impact
+
+# Footer (optional)
+# BREAKING CHANGE: describe what breaks and migration steps
+# Refs: issue links or references
