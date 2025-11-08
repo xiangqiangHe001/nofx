@@ -5,6 +5,7 @@
 
 # 决策日志（统一根目录）
 decision_logs/
+archives/
 
 # Local sensitive config (do not push secrets)
 trade/config.json

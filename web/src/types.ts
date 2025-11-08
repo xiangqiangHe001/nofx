@@ -23,6 +23,7 @@ export interface AccountInfo {
   total_pnl_pct: number;
   total_unrealized_pnl: number;
   initial_balance: number;
+  invested_amount: number;
   daily_pnl: number;
   position_count: number;
   margin_used: number;

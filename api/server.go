@@ -157,6 +157,9 @@ func (s *Server) setupRoutes() {
         api.GET("/decisions/latest", s.handleLatestDecisions)
         // 动态设置初始资金基线（用于存取款后的基线校准）
         api.POST("/initial-balance", s.handleSetInitialBalance)
+        // 投资信息与动态调整
+        api.GET("/investment", s.handleInvestment)
+        api.POST("/investment/adjust", s.handleInvestmentAdjust)
         // 平仓明细日志（过滤 close_* 动作）
         api.GET("/close-logs", s.handleCloseLogs)
 		api.GET("/statistics", s.handleStatistics)
@@ -645,27 +648,13 @@ func (s *Server) handleEquityHistory(c *gin.Context) {
 		CycleNumber      int     `json:"cycle_number"`
 	}
 
-	// 从AutoTrader获取初始余额（用于计算盈亏百分比）
-	initialBalance := 0.0
-	if status := trader.GetStatus(); status != nil {
-		if ib, ok := status["initial_balance"].(float64); ok && ib > 0 {
-			initialBalance = ib
-		}
-	}
-
-	// 如果无法从status获取，且有历史记录，则从第一条记录获取
-	if initialBalance == 0 && len(records) > 0 {
-		// 第一条记录的equity作为初始余额
-		initialBalance = records[0].AccountState.TotalBalance
-	}
-
-	// 如果还是无法获取，返回错误
-	if initialBalance == 0 {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "无法获取初始余额",
-		})
-		return
-	}
+    // 读取初始余额用于展示；百分比采用“动态累计投入”基线
+    initialBalance := 0.0
+    if status := trader.GetStatus(); status != nil {
+        if ib, ok := status["initial_balance"].(float64); ok && ib > 0 {
+            initialBalance = ib
+        }
+    }
 
 	var history []EquityPoint
 	for _, record := range records {
@@ -674,11 +663,15 @@ func (s *Server) handleEquityHistory(c *gin.Context) {
 		// TotalUnrealizedProfit字段实际存储的是TotalPnL（相对初始余额）
 		totalPnL := record.AccountState.TotalUnrealizedProfit
 
-		// 计算盈亏百分比
-		totalPnLPct := 0.0
-		if initialBalance > 0 {
-			totalPnLPct = (totalPnL / initialBalance) * 100
-		}
+        // 计算盈亏百分比：使用“截止该记录时间的累计投入金额”作为基线
+        totalPnLPct := 0.0
+        investedAt := trader.GetInvestedAmountAt(record.Timestamp)
+        if investedAt > 0 {
+            totalPnLPct = (totalPnL / investedAt) * 100
+        } else if initialBalance > 0 {
+            // 兜底：累计投入不可用时，退回初始余额
+            totalPnLPct = (totalPnL / initialBalance) * 100
+        }
 
 		history = append(history, EquityPoint{
 			Timestamp:        record.Timestamp.Format("2006-01-02 15:04:05"),
@@ -693,6 +686,74 @@ func (s *Server) handleEquityHistory(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, history)
+}
+
+// handleInvestment 获取投资信息（总投入金额 + 调整事件）
+func (s *Server) handleInvestment(c *gin.Context) {
+    _, traderID, err := s.getTraderFromQuery(c)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+
+    t, err := s.traderManager.GetTrader(traderID)
+    if err != nil {
+        c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+        return
+    }
+
+    invested := t.GetInvestedAmount()
+    adjs := t.GetInvestmentAdjustments()
+
+    // 规范化输出（时间戳转字符串）
+    type Adj struct {
+        Amount    float64 `json:"amount"`
+        Timestamp string  `json:"timestamp"`
+        Note      string  `json:"note,omitempty"`
+    }
+    out := make([]Adj, 0, len(adjs))
+    for _, a := range adjs {
+        out = append(out, Adj{Amount: a.Amount, Timestamp: a.Timestamp.Format("2006-01-02 15:04:05"), Note: a.Note})
+    }
+
+    c.JSON(http.StatusOK, gin.H{
+        "trader_id":       traderID,
+        "invested_amount": invested,
+        "adjustments":     out,
+    })
+}
+
+// handleInvestmentAdjust 追加投资调整（正数入金，负数出金）
+func (s *Server) handleInvestmentAdjust(c *gin.Context) {
+    var req struct {
+        TraderID string  `json:"trader_id"`
+        Amount   float64 `json:"amount"`
+        Note     string  `json:"note"`
+    }
+    if err := c.ShouldBindJSON(&req); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json: " + err.Error()})
+        return
+    }
+    if req.TraderID == "" || req.Amount == 0 {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "trader_id 不能为空且 amount 不能为 0"})
+        return
+    }
+
+    t, err := s.traderManager.GetTrader(req.TraderID)
+    if err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+    if err := t.AddInvestmentDelta(req.Amount, req.Note); err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+        return
+    }
+
+    c.JSON(http.StatusOK, gin.H{
+        "success":         true,
+        "trader_id":       req.TraderID,
+        "invested_amount": t.GetInvestedAmount(),
+    })
 }
 
 // handlePerformance AI历史表现分析（用于展示AI学习和反思）

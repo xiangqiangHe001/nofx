@@ -49,6 +49,8 @@ type TraderConfig struct {
 	CustomModelName string `json:"custom_model_name,omitempty"`
 
 	InitialBalance      float64 `json:"initial_balance"`
+	// 额外投入（追加入金），用于更准确地计算总盈亏基线
+	ExtraInvestment     float64 `json:"extra_investment,omitempty"`
 	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
 
     // 初始资金基线自动对齐与持久化（可选）
@@ -203,6 +205,7 @@ func (c *Config) Validate() error {
         if trader.InitialBalance <= 0 {
             return fmt.Errorf("trader[%d]: initial_balance必须大于0", i)
         }
+        // 额外投入允许为0或未配置（默认为0），无需强制校验
         if trader.ScanIntervalMinutes <= 0 {
             trader.ScanIntervalMinutes = 3
         }

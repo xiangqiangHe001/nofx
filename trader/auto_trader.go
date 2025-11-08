@@ -6,6 +6,7 @@ import (
     "strconv"
     "log"
     "math"
+    "unicode/utf8"
     "nofx/decision"
     "nofx/logger"
     "nofx/market"
@@ -16,6 +17,81 @@ import (
 	"strings"
 	"time"
 )
+
+// summarizeDecisionError 将较长的错误信息压缩为简洁摘要，用于展示到前端卡片
+// 规则：
+// - 去除思维链附加段（"=== AI思维链分析 ==="/"=== AI Chain of Thought ==="）
+// - 标准化常见错误标签并拼接简短原因
+// - 仅保留首行，移除末尾的方括号细节块
+// - 限制最大长度（160字符）
+func summarizeDecisionError(s string) string {
+    t := strings.TrimSpace(s)
+    if t == "" {
+        return t
+    }
+
+    // 去除思维链附加内容
+    if i := strings.Index(t, "=== AI思维链分析 ==="); i != -1 {
+        t = strings.TrimSpace(t[:i])
+    }
+    if i := strings.Index(t, "=== AI Chain of Thought ==="); i != -1 {
+        t = strings.TrimSpace(t[:i])
+    }
+
+    // 统一标签
+    lower := strings.ToLower(t)
+    label := ""
+    switch {
+    case strings.Contains(lower, "failed to parse ai response"):
+        label = "AI决策解析失败"
+    case strings.Contains(t, "提取决策失败"):
+        label = "AI决策提取失败"
+    case strings.Contains(t, "JSON解析失败") || (strings.Contains(lower, "json") && strings.Contains(lower, "parse")):
+        label = "AI决策JSON解析失败"
+    case strings.Contains(t, "决策验证失败"):
+        label = "AI决策校验未通过"
+    case strings.Contains(t, "无法找到JSON数组起始") || strings.Contains(t, "无法找到JSON数组结束"):
+        label = "AI未输出有效JSON决策数组"
+    case strings.Contains(lower, "failed to call ai api"):
+        label = "AI接口调用失败"
+    case strings.Contains(lower, "failed to fetch market data"):
+        label = "市场数据获取失败"
+    }
+
+    // 仅保留首行并提取冒号后的原因
+    firstLine := t
+    if idx := strings.Index(firstLine, "\n"); idx != -1 {
+        firstLine = strings.TrimSpace(firstLine[:idx])
+    }
+    compact := firstLine
+    if idx := strings.Index(compact, ":"); idx != -1 {
+        compact = strings.TrimSpace(compact[idx+1:])
+    }
+    // 去除末尾方括号细节
+    if strings.HasSuffix(compact, "]") {
+        if lidx := strings.LastIndex(compact, "["); lidx != -1 {
+            compact = strings.TrimSpace(compact[:lidx])
+        }
+    }
+
+    out := firstLine
+    if label != "" {
+        if compact != "" {
+            out = label + ": " + compact
+        } else {
+            out = label
+        }
+    }
+
+    // 限制最大长度（按rune计数避免截断半个字符）
+    const maxLen = 160
+    if utf8.RuneCountInString(out) > maxLen {
+        // 截断为 maxLen-1 并添加省略号
+        runes := []rune(out)
+        out = string(runes[:maxLen-1]) + "…"
+    }
+    return out
+}
 
 // AutoTraderConfig 自动交易配置（简化版 - AI全权决策）
 type AutoTraderConfig struct {
@@ -61,8 +137,9 @@ type AutoTraderConfig struct {
 	// 扫描配置
 	ScanInterval time.Duration // 扫描间隔（建议3分钟）
 
-	// 账户配置
-	InitialBalance float64 // 初始金额（用于计算盈亏，需手动设置）
+    // 账户配置
+    InitialBalance float64 // 初始金额（用于计算盈亏，需手动设置）
+    ExtraInvestment float64 // 额外投入金额（追加入金），用于计算真实投入基线
     AutoCalibrateInitialBalance bool    // 是否自动对齐基线（含入金校准）
     CalibrationThreshold        float64 // 触发自动校准的最小差额（USDT）
     PersistInitialBalance       bool    // 是否持久化初始余额到本地文件
@@ -91,10 +168,13 @@ type AutoTrader struct {
     decisionLogger       *logger.DecisionLogger // 决策日志记录器
     initialBalance       float64
     dailyPnL             float64
-	lastResetTime        time.Time
-	stopUntil            time.Time
-	isRunning            bool
-	startTime            time.Time                 // 系统启动时间
+    // 每日盈亏基线（当天开头的净值，用于计算日盈亏）
+    dailyBaseline        float64
+    dailyBaselineDate    string // 格式: YYYY-MM-DD
+    lastResetTime        time.Time
+    stopUntil            time.Time
+    isRunning            bool
+    startTime            time.Time                 // 系统启动时间
     callCount            int                       // AI调用次数
     positionFirstSeenTime map[string]int64         // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
     executionEnabled     bool                      // 是否启用自动执行
@@ -103,6 +183,10 @@ type AutoTrader struct {
     autoCalibrateBaseline bool
     calibrationThreshold  float64
     baselineStatePath     string
+    // 投资调整（动态入金/出金）
+    investmentAdjustments []InvestmentAdjustment
+    investmentStatePath   string
+    lastInvestmentSync    time.Time
 }
 
 // NewAutoTrader 创建自动交易器
@@ -209,9 +293,29 @@ case "binance":
         safeID := strings.ReplaceAll(config.ID, " ", "_")
         fileName := fmt.Sprintf("initial_balance_%s.json", safeID)
         at.baselineStatePath = filepath.Join(config.InitialBalanceStateDir, fileName)
-        if v, err := at.loadInitialBalanceFromFile(); err == nil && v > 0 {
-            at.initialBalance = v
-            log.Printf("🧷 [%s] 读取持久化初始余额: %.2f", config.Name, v)
+        // 当启用自动校准时，优先使用配置中的初始资金，使后续差额以“投资调整”记录，而非直接覆盖初始值
+        if !config.AutoCalibrateInitialBalance {
+            if v, err := at.loadInitialBalanceFromFile(); err == nil && v > 0 {
+                at.initialBalance = v
+                log.Printf("🧷 [%s] 读取持久化初始余额: %.2f", config.Name, v)
+            }
+        } else {
+            log.Printf("🧷 [%s] 忽略持久化初始余额，使用配置初始资金以便按账户变化记录投资调整", config.Name)
+        }
+        // 尝试加载当日基线（若存在）
+        if db, dd, err := at.loadDailyBaselineFromFile(); err == nil && db > 0 && dd != "" {
+            at.dailyBaseline = db
+            at.dailyBaselineDate = dd
+            log.Printf("🧷 [%s] 读取当日基线: date=%s baseline=%.2f", config.Name, dd, db)
+        }
+        // 初始化投资调整状态文件路径并加载
+        invFile := fmt.Sprintf("investments_%s.json", safeID)
+        at.investmentStatePath = filepath.Join(config.InitialBalanceStateDir, invFile)
+        if list, err := at.loadInvestmentAdjustmentsFromFile(); err == nil {
+            at.investmentAdjustments = list
+            if len(list) > 0 {
+                log.Printf("🧷 [%s] 读取投资调整记录 %d 条", config.Name, len(list))
+            }
         }
     }
 
@@ -222,7 +326,7 @@ case "binance":
 func (at *AutoTrader) Run() error {
     at.isRunning = true
     log.Println("🚀 AI驱动自动交易系统启动")
-    log.Printf("💰 初始余额: %.2f USDT", at.initialBalance)
+    log.Printf("💰 初始余额: %.2f USDT | 额外投入: %.2f USDT | 总投入: %.2f USDT", at.initialBalance, at.config.ExtraInvestment, at.initialBalance+at.config.ExtraInvestment)
     log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
     log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
 
@@ -252,6 +356,19 @@ func (at *AutoTrader) Stop() {
 	log.Println("⏹ 自动交易系统停止")
 }
 
+// investedBaseline 返回用于计算总盈亏的真实投入基线（初始余额 + 额外投入）
+func (at *AutoTrader) investedBaseline() float64 {
+    base := at.initialBalance
+    if at.config.ExtraInvestment > 0 {
+        base += at.config.ExtraInvestment
+    }
+    // 动态投资调整累计
+    for _, adj := range at.investmentAdjustments {
+        base += adj.Amount
+    }
+    return base
+}
+
 // runCycle 运行一个交易周期（使用AI全权决策）
 func (at *AutoTrader) runCycle() error {
 	at.callCount++
@@ -271,23 +388,27 @@ func (at *AutoTrader) runCycle() error {
         remaining := time.Until(at.stopUntil)
         log.Printf("⏸ 风险控制：暂停交易中，剩余 %.0f 分钟", remaining.Minutes())
         record.Success = false
-        record.ErrorMessage = fmt.Sprintf("风险控制暂停中，剩余 %.0f 分钟", remaining.Minutes())
+        record.ErrorMessage = summarizeDecisionError(fmt.Sprintf("风险控制暂停中，剩余 %.0f 分钟", remaining.Minutes()))
         at.decisionLogger.LogDecision(record)
         return nil
     }
 
-	// 2. 重置日盈亏（每天重置）
-	if time.Since(at.lastResetTime) > 24*time.Hour {
-		at.dailyPnL = 0
-		at.lastResetTime = time.Now()
-		log.Println("📅 日盈亏已重置")
-	}
+    // 2. 检查日期切换并确保当日基线存在（以 runCycle 时刻的净值作为当天初始值）
+    // 实际日盈亏计算在 GetAccountInfo 中完成，这里仅在跨日时清理旧值
+    if time.Since(at.lastResetTime) > 24*time.Hour {
+        at.lastResetTime = time.Now()
+        // 将 dailyBaselineDate 置为当天，具体数值在下一次账户读取时初始化
+        at.dailyBaselineDate = time.Now().Format("2006-01-02")
+        at.dailyBaseline = 0
+        _ = at.saveDailyBaselineToFile()
+        log.Println("📅 新的一天开始，日基线待初始化")
+    }
 
 	// 3. 收集交易上下文
 	ctx, err := at.buildTradingContext()
 	if err != nil {
 		record.Success = false
-		record.ErrorMessage = fmt.Sprintf("构建交易上下文失败: %v", err)
+        record.ErrorMessage = summarizeDecisionError(fmt.Sprintf("构建交易上下文失败: %v", err))
 		at.decisionLogger.LogDecision(record)
 		return fmt.Errorf("构建交易上下文失败: %w", err)
 	}
@@ -342,7 +463,7 @@ func (at *AutoTrader) runCycle() error {
 
 	if err != nil {
 		record.Success = false
-		record.ErrorMessage = fmt.Sprintf("获取AI决策失败: %v", err)
+        record.ErrorMessage = summarizeDecisionError(fmt.Sprintf("获取AI决策失败: %v", err))
 
 		// 打印AI思维链（即使有错误）
 		if decision != nil && decision.CoTTrace != "" {
@@ -563,12 +684,13 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	log.Printf("📋 合并币种池: AI500前%d + OI_Top20 = 总计%d个候选币种",
 		ai500Limit, len(candidateCoins))
 
-	// 4. 计算总盈亏
-	totalPnL := totalEquity - at.initialBalance
-	totalPnLPct := 0.0
-	if at.initialBalance > 0 {
-		totalPnLPct = (totalPnL / at.initialBalance) * 100
-	}
+    // 4. 计算总盈亏（使用真实投入基线：初始余额 + 额外投入）
+    invested := at.investedBaseline()
+    totalPnL := totalEquity - invested
+    totalPnLPct := 0.0
+    if invested > 0 {
+        totalPnLPct = (totalPnL / invested) * 100
+    }
 
 	marginUsedPct := 0.0
 	if totalEquity > 0 {
@@ -1325,6 +1447,8 @@ func (at *AutoTrader) RunAiCloseThenOpen() (map[string]interface{}, error) {
 
 // GetAccountInfo 获取账户信息（用于API）
 func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
+    // 在获取账户前同步交易所入金/出金为投资调整（节流控制）
+    at.syncInvestmentsFromExchange()
     // DryRun 优先：直接使用初始余额作为账户状态，避免依赖私有接口
     if at.config.DryRun {
         totalWalletBalance := at.initialBalance
@@ -1332,10 +1456,11 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
         totalUnrealizedProfit := 0.0
 
         totalEquity := totalWalletBalance + totalUnrealizedProfit
-        totalPnL := totalEquity - at.initialBalance
+        invested := at.investedBaseline()
+        totalPnL := totalEquity - invested
         totalPnLPct := 0.0
-        if at.initialBalance > 0 {
-            totalPnLPct = (totalPnL / at.initialBalance) * 100
+        if invested > 0 {
+            totalPnLPct = (totalPnL / invested) * 100
         }
 
         return map[string]interface{}{
@@ -1347,6 +1472,7 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
             "total_pnl_pct":        totalPnLPct,
             "total_unrealized_pnl": 0.0,
             "initial_balance":      at.initialBalance,
+            "invested_amount":      invested,
             "daily_pnl":            at.dailyPnL,
             "position_count":       0,
             "margin_used":          0.0,
@@ -1416,46 +1542,59 @@ func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
 		totalMarginUsed += marginUsed
 	}
 
-    // 自动基线对齐：在空仓且差额超过阈值时，将初始余额对齐到当前钱包余额
+    // 自动基线对齐（谨慎）：检测到差额仅记录日志，避免将盈亏误判为入金/出金
     if at.autoCalibrateBaseline && len(positions) == 0 && at.calibrationThreshold > 0 {
-        if totalWalletBalance > 0 && math.Abs(totalWalletBalance-at.initialBalance) >= at.calibrationThreshold {
-            old := at.initialBalance
-            at.initialBalance = totalWalletBalance
-            log.Printf("🔧 [%s] 自动校准初始资金基线: %.2f -> %.2f (空仓账户余额对齐)", at.GetName(), old, at.initialBalance)
-            _ = at.saveInitialBalanceToFile()
+        base := at.investedBaseline()
+        delta := totalWalletBalance - base
+        if math.Abs(delta) >= at.calibrationThreshold {
+            log.Printf("ℹ️ [%s] 检测到账户余额与投入基线存在差额 Δ=%.2f (wallet %.2f vs baseline %.2f)。为避免误判，未自动记录资金调整。", at.GetName(), delta, totalWalletBalance, base)
         }
     }
 
-    totalPnL := totalEquity - at.initialBalance
-	totalPnLPct := 0.0
-	if at.initialBalance > 0 {
-		totalPnLPct = (totalPnL / at.initialBalance) * 100
-	}
+    // 计算总盈亏（相对真实投入基线：初始余额 + 额外投入）
+    invested := at.investedBaseline()
+    totalPnL := totalEquity - invested
+    totalPnLPct := 0.0
+    if invested > 0 {
+        totalPnLPct = (totalPnL / invested) * 100
+    }
 
 	marginUsedPct := 0.0
 	if totalEquity > 0 {
 		marginUsedPct = (totalMarginUsed / totalEquity) * 100
 	}
 
-	return map[string]interface{}{
-		// 核心字段
-		"total_equity":      totalEquity,           // 账户净值 = wallet + unrealized
-		"wallet_balance":    totalWalletBalance,    // 钱包余额（不含未实现盈亏）
-		"unrealized_profit": totalUnrealizedProfit, // 未实现盈亏（从API）
-		"available_balance": availableBalance,      // 可用余额
+    // 计算当日盈亏：以“当天首次可用的净值”为基线
+    today := time.Now().Format("2006-01-02")
+    if at.dailyBaselineDate != today || at.dailyBaseline <= 0 {
+        at.dailyBaselineDate = today
+        at.dailyBaseline = totalEquity
+        // 尝试持久化当前日基线（可选）
+        _ = at.saveDailyBaselineToFile()
+        log.Printf("📅 [%s] 设置当日基线: date=%s baseline=%.2f", at.GetName(), today, at.dailyBaseline)
+    }
+    dailyPnL := totalEquity - at.dailyBaseline
+
+    return map[string]interface{}{
+        // 核心字段
+        "total_equity":      totalEquity,           // 账户净值 = wallet + unrealized
+        "wallet_balance":    totalWalletBalance,    // 钱包余额（不含未实现盈亏）
+        "unrealized_profit": totalUnrealizedProfit, // 未实现盈亏（从API）
+        "available_balance": availableBalance,      // 可用余额
 
 		// 盈亏统计
 		"total_pnl":            totalPnL,           // 总盈亏 = equity - initial
 		"total_pnl_pct":        totalPnLPct,        // 总盈亏百分比
 		"total_unrealized_pnl": totalUnrealizedPnL, // 未实现盈亏（从持仓计算）
-		"initial_balance":      at.initialBalance,  // 初始余额
-		"daily_pnl":            at.dailyPnL,        // 日盈亏
+        "initial_balance":      at.initialBalance,  // 初始余额
+        "invested_amount":      invested,           // 真实投入 = 初始余额 + 额外投入 + 调整
+        "daily_pnl":            dailyPnL,           // 日盈亏 = 当前净值 - 当日基线
 
 		// 持仓信息
 		"position_count":  len(positions),  // 持仓数量
 		"margin_used":     totalMarginUsed, // 保证金占用
 		"margin_used_pct": marginUsedPct,   // 保证金使用率
-	}, nil
+    }, nil
 }
 
 // SetInitialBalance 动态设置初始资金基线（用于存取款后的基线校准）
@@ -1598,4 +1737,140 @@ func (at *AutoTrader) loadInitialBalanceFromFile() (float64, error) {
         }
     }
     return 0, fmt.Errorf("invalid state file")
+}
+
+// 持久化：保存当日基线（可选）
+func (at *AutoTrader) saveDailyBaselineToFile() error {
+    if at.baselineStatePath == "" {
+        return nil
+    }
+    // 使用相邻文件 daily_baseline_<id>.json
+    safeID := strings.ReplaceAll(at.id, " ", "_")
+    fileName := fmt.Sprintf("daily_baseline_%s.json", safeID)
+    p := filepath.Join(filepath.Dir(at.baselineStatePath), fileName)
+    if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+        return err
+    }
+    data := map[string]interface{}{
+        "date":     at.dailyBaselineDate,
+        "baseline": at.dailyBaseline,
+        "updated_at": time.Now().Unix(),
+    }
+    b, _ := json.MarshalIndent(data, "", "  ")
+    return os.WriteFile(p, b, 0o644)
+}
+
+// 持久化：读取当日基线（可选）
+func (at *AutoTrader) loadDailyBaselineFromFile() (float64, string, error) {
+    if at.baselineStatePath == "" {
+        return 0, "", fmt.Errorf("no state path")
+    }
+    safeID := strings.ReplaceAll(at.id, " ", "_")
+    fileName := fmt.Sprintf("daily_baseline_%s.json", safeID)
+    p := filepath.Join(filepath.Dir(at.baselineStatePath), fileName)
+    b, err := os.ReadFile(p)
+    if err != nil {
+        return 0, "", err
+    }
+    var m map[string]interface{}
+    if err := json.Unmarshal(b, &m); err != nil {
+        return 0, "", err
+    }
+    date := ""
+    if ds, ok := m["date"].(string); ok {
+        date = ds
+    }
+    baseline := 0.0
+    if v, ok := m["baseline"].(float64); ok {
+        baseline = v
+    } else if vInt, ok := m["baseline"].(int); ok {
+        baseline = float64(vInt)
+    } else if vStr, ok := m["baseline"].(string); ok {
+        if f, err := strconv.ParseFloat(vStr, 64); err == nil {
+            baseline = f
+        }
+    }
+    if baseline <= 0 || date == "" {
+        return 0, "", fmt.Errorf("invalid daily baseline file")
+    }
+    return baseline, date, nil
+}
+
+// InvestmentAdjustment 资金调整事件（正数为追加入金，负数为取出/划转）
+type InvestmentAdjustment struct {
+    Amount    float64   `json:"amount"`
+    Timestamp time.Time `json:"timestamp"`
+    Note      string    `json:"note,omitempty"`
+}
+
+// AddInvestmentDelta 追加一条资金调整记录（正加负减），并持久化
+func (at *AutoTrader) AddInvestmentDelta(amount float64, note string) error {
+    if amount == 0 {
+        return nil
+    }
+    adj := InvestmentAdjustment{Amount: amount, Timestamp: time.Now(), Note: note}
+    at.investmentAdjustments = append(at.investmentAdjustments, adj)
+    return at.saveInvestmentAdjustmentsToFile()
+}
+
+// GetInvestedAmount 返回当前累计真实投入金额（初始+额外+所有调整）
+func (at *AutoTrader) GetInvestedAmount() float64 {
+    return at.investedBaseline()
+}
+
+// GetInvestmentAdjustments 返回资金调整事件列表（只读副本）
+func (at *AutoTrader) GetInvestmentAdjustments() []InvestmentAdjustment {
+    // 返回副本，避免外部修改内部切片
+    out := make([]InvestmentAdjustment, len(at.investmentAdjustments))
+    copy(out, at.investmentAdjustments)
+    return out
+}
+
+// GetInvestedAmountAt 返回指定时间点累计真实投入金额（初始+额外+截止该时间的调整）
+func (at *AutoTrader) GetInvestedAmountAt(t time.Time) float64 {
+    base := at.initialBalance
+    if at.config.ExtraInvestment > 0 {
+        base += at.config.ExtraInvestment
+    }
+    for _, adj := range at.investmentAdjustments {
+        if !adj.Timestamp.After(t) {
+            base += adj.Amount
+        }
+    }
+    return base
+}
+
+// saveInvestmentAdjustmentsToFile 保存资金调整记录到本地文件
+func (at *AutoTrader) saveInvestmentAdjustmentsToFile() error {
+    if at.investmentStatePath == "" {
+        return nil
+    }
+    // 确保目录存在
+    if err := os.MkdirAll(filepath.Dir(at.investmentStatePath), 0o755); err != nil {
+        return err
+    }
+    data, err := json.MarshalIndent(at.investmentAdjustments, "", "  ")
+    if err != nil {
+        return err
+    }
+    return os.WriteFile(at.investmentStatePath, data, 0o644)
+}
+
+// loadInvestmentAdjustmentsFromFile 读取本地资金调整记录
+func (at *AutoTrader) loadInvestmentAdjustmentsFromFile() ([]InvestmentAdjustment, error) {
+    if at.investmentStatePath == "" {
+        return nil, nil
+    }
+    b, err := os.ReadFile(at.investmentStatePath)
+    if err != nil {
+        if os.IsNotExist(err) {
+            return []InvestmentAdjustment{}, nil
+        }
+        return nil, err
+    }
+    var list []InvestmentAdjustment
+    if err := json.Unmarshal(b, &list); err != nil {
+        return nil, err
+    }
+    return list, nil
 }

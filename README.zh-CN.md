@@ -1208,6 +1208,22 @@ sudo apt-get install libta-lib0-dev
 
 ---
 
+## 🗃️ 日志归档与恢复
+
+为避免历史决策日志丢失，提供两套工具：每日归档与定向恢复。
+
+- 每日归档
+  - 运行 `go run tools/archive_decision_logs.go -root . -out archives -date YYYYMMDD`
+  - 将 `decision_logs/<trader_id>/decision_*.json` 打包为 `archives/YYYYMMDD_<trader_id>.zip`
+  - 可追加 `-dry` 演练，不实际写入
+
+- 回收站定向恢复（仅限 `D:\TRAE\projerct`）
+  - 预览可恢复项：`powershell -ExecutionPolicy Bypass -File tools/recover_decision_logs.ps1 -RecycleDrive D -ProjectPath 'D:\TRAE\projerct'`
+  - 执行恢复：`powershell -ExecutionPolicy Bypass -File tools/recover_decision_logs.ps1 -RecycleDrive D -ProjectPath 'D:\TRAE\projerct' -Restore`
+  - 说明：脚本仅枚举当前用户回收站 `$I*` 索引，解析原路径并定位对应 `$R*` 数据文件进行恢复，避免全盘递归造成卡顿。
+
+建议：将归档命令加入计划任务，每日生成 `archives`，并将该目录同步到外部盘或云端。
+
 ## 🔄 更新日志
 
 ### v2.0.2 (2025-10-29)

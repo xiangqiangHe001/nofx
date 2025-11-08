@@ -44,6 +44,9 @@ type OKXTrader struct {
     failureMu   sync.Mutex
     lastFail    map[string]time.Time // key: symbol|side
     failCount   map[string]int       // key: symbol|side
+
+    // 投资同步：入金/出金历史缓存（避免频繁请求）
+    lastInvestSync time.Time
 }
 
 // NewOKXTrader 创建OKX交易器
@@ -692,6 +695,105 @@ func (o *OKXTrader) recordFailure(symbol, side string) {
     defer o.failureMu.Unlock()
     o.lastFail[key] = time.Now()
     o.failCount[key] = o.failCount[key] + 1
+}
+
+// ===== 资金记录（入金/提出） =====
+
+// GetAssetDepositHistory 获取USDT入金历史（资产维度）
+func (o *OKXTrader) GetAssetDepositHistory(limit int) ([]map[string]interface{}, error) {
+    if o.apiKey == "" || o.secretKey == "" || o.passphrase == "" {
+        return nil, fmt.Errorf("OKX API keys are not configured")
+    }
+    if limit <= 0 { limit = 100 }
+    // OKX 资产入金历史接口
+    // 文档：/api/v5/asset/deposit-history
+    // 这里选择 USDT
+    path := "/api/v5/asset/deposit-history?ccy=USDT"
+    respBody, err := o.doSignedRequest("GET", path, "")
+    if err != nil {
+        return nil, fmt.Errorf("failed to get deposit history: %w", err)
+    }
+    var payload struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            Ccy   string `json:"ccy"`
+            Amt   string `json:"amt"`
+            TxID  string `json:"txId"`
+            From  string `json:"from"`
+            To    string `json:"to"`
+            State string `json:"state"`
+            Ts    string `json:"ts"`
+        } `json:"data"`
+    }
+    if err := json.Unmarshal(respBody, &payload); err != nil {
+        return nil, fmt.Errorf("failed to parse deposit history: %w", err)
+    }
+    if payload.Code != "0" {
+        return nil, fmt.Errorf("OKX deposit history API error: code=%s msg=%s", payload.Code, payload.Msg)
+    }
+    var result []map[string]interface{}
+    for _, d := range payload.Data {
+        amt := parseFloat(d.Amt)
+        result = append(result, map[string]interface{}{
+            "ccy":  d.Ccy,
+            "amount": amt,
+            "tx_id": d.TxID,
+            "state": d.State,
+            "ts":    d.Ts,
+            "from":  d.From,
+            "to":    d.To,
+        })
+        if len(result) >= limit { break }
+    }
+    return result, nil
+}
+
+// GetAssetWithdrawalHistory 获取USDT提出历史（资产维度）
+func (o *OKXTrader) GetAssetWithdrawalHistory(limit int) ([]map[string]interface{}, error) {
+    if o.apiKey == "" || o.secretKey == "" || o.passphrase == "" {
+        return nil, fmt.Errorf("OKX API keys are not configured")
+    }
+    if limit <= 0 { limit = 100 }
+    path := "/api/v5/asset/withdrawal-history?ccy=USDT"
+    respBody, err := o.doSignedRequest("GET", path, "")
+    if err != nil {
+        return nil, fmt.Errorf("failed to get withdrawal history: %w", err)
+    }
+    var payload struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            Ccy   string `json:"ccy"`
+            Amt   string `json:"amt"`
+            TxID  string `json:"txId"`
+            State string `json:"state"`
+            Ts    string `json:"ts"`
+            From  string `json:"from"`
+            To    string `json:"to"`
+        } `json:"data"`
+    }
+    if err := json.Unmarshal(respBody, &payload); err != nil {
+        return nil, fmt.Errorf("failed to parse withdrawal history: %w", err)
+    }
+    if payload.Code != "0" {
+        return nil, fmt.Errorf("OKX withdrawal history API error: code=%s msg=%s", payload.Code, payload.Msg)
+    }
+    var result []map[string]interface{}
+    for _, d := range payload.Data {
+        amt := parseFloat(d.Amt)
+        result = append(result, map[string]interface{}{
+            "ccy":  d.Ccy,
+            "amount": amt,
+            "tx_id": d.TxID,
+            "state": d.State,
+            "ts":    d.Ts,
+            "from":  d.From,
+            "to":    d.To,
+        })
+        if len(result) >= limit { break }
+    }
+    return result, nil
 }
 
 

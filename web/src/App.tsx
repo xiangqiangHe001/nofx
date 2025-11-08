@@ -438,7 +438,7 @@ function TraderDetailsPage({
         <div className="mb-4 p-3 rounded text-xs font-mono" style={{ background: '#1E2329', border: '1px solid #2B3139' }}>
           <div style={{ color: '#848E9C' }}>
             🔄 Last Update: {lastUpdate} | Total Equity: {account.total_equity?.toFixed(2) || '0.00'} |
-            Available: {account.available_balance?.toFixed(2) || '0.00'} | P&L: {account.total_pnl?.toFixed(2) || '0.00'}{' '}
+            Available: {account.available_balance?.toFixed(2) || '0.00'} | Invested: {account.invested_amount?.toFixed(2) || '0.00'} | P&L: {account.total_pnl?.toFixed(2) || '0.00'}{' '}
             ({account.total_pnl_pct?.toFixed(2) || '0.00'}%)
           </div>
         </div>
@@ -456,6 +456,11 @@ function TraderDetailsPage({
           title={t('availableBalance', language)}
           value={`${account?.available_balance?.toFixed(2) || '0.00'} USDT`}
           subtitle={`${(account?.available_balance && account?.total_equity ? ((account.available_balance / account.total_equity) * 100).toFixed(1) : '0.0')}% ${t('free', language)}`}
+        />
+        <StatCard
+          title={language === 'zh' ? '总投入' : 'Invested'}
+          value={`${account?.invested_amount?.toFixed(2) || '0.00'} USDT`}
+          subtitle={account?.total_equity && account?.invested_amount ? `${((account.invested_amount / account.total_equity) * 100).toFixed(1)}% ${language === 'zh' ? '占总权益' : 'of equity'}` : undefined}
         />
         <StatCard
           title={t('totalPnL', language)}
@@ -764,6 +769,51 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
   })();
   const normalizedErrorMessage: string | undefined = (decision as any)?.error_message ?? (decision as any)?.ErrorMessage;
 
+  // 简化并归一化错误文案（去除思维链尾段、统一标签、限制长度）
+  const normalizeErrorText = (s?: string): string | undefined => {
+    if (!s) return undefined;
+    let t = String(s).trim();
+    // 去除思维链附加内容
+    const markers = ['=== AI思维链分析 ===', '=== AI Chain of Thought ==='];
+    for (const m of markers) {
+      const i = t.indexOf(m);
+      if (i !== -1) {
+        t = t.slice(0, i).trim();
+        break;
+      }
+    }
+    // 统一常见错误标签
+    const rules: Array<{ re: RegExp; label: string }> = [
+      { re: /failed\s+to\s+parse\s+AI\s+response/i, label: 'AI决策解析失败' },
+      { re: /提取决策失败/i, label: 'AI决策提取失败' },
+      { re: /JSON解析失败/i, label: 'AI决策JSON解析失败' },
+      { re: /决策验证失败/i, label: 'AI决策校验未通过' },
+      { re: /无法找到JSON数组(起始|结束)/i, label: 'AI未输出有效JSON决策数组' },
+      { re: /failed\s+to\s+call\s+AI\s+API/i, label: 'AI接口调用失败' },
+      { re: /failed\s+to\s+fetch\s+market\s+data/i, label: '市场数据获取失败' },
+    ];
+    for (const { re, label } of rules) {
+      if (re.test(t)) {
+        // 提取首行或冒号后的简短原因
+        let reason = t;
+        const firstLine = reason.split('\n')[0];
+        const parts = firstLine.split(':');
+        // 去掉中文前缀“获取AI决策失败”之类的多余包装
+        const compact = parts.length > 1 ? parts.slice(1).join(':').trim() : firstLine.trim();
+        t = compact ? `${label}: ${compact}` : label;
+        break;
+      }
+    }
+    // 再次去掉冗余括号细节末尾
+    t = t.replace(/\s*\[[^\]]*\]\s*$/, '');
+    // 只保留首行
+    t = t.split('\n')[0].trim();
+    // 限制最大长度，避免撑爆UI
+    const maxLen = 160;
+    if (t.length > maxLen) t = t.slice(0, maxLen - 1) + '…';
+    return t;
+  };
+
   // 提取余额不足与数值信息（required/available）
   const logs: string[] = (decision as any)?.execution_log || [];
   // 仅从执行日志判断交易账户的“余额不足”（避免将AI服务商的配额不足误判为USDT余额不足）
@@ -975,7 +1025,7 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
       {/* Error Message */}
       {normalizedErrorMessage && (
         <div className="text-sm rounded px-3 py-2 mt-3" style={{ color: '#F6465D', background: 'rgba(246, 70, 93, 0.1)' }}>
-          ❌ {normalizedErrorMessage}
+          ❌ {normalizeErrorText(normalizedErrorMessage) ?? normalizedErrorMessage}
         </div>
       )}
     </div>
