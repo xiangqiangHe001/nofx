@@ -169,7 +169,7 @@ export function EquityChart({ traderId }: EquityChartProps) {
           <div className="flex flex-col sm:flex-row sm:items-baseline gap-2 sm:gap-4">
             <span className="text-2xl sm:text-3xl font-bold mono" style={{ color: '#EAECEF' }}>
               {account?.total_equity.toFixed(2) || '0.00'}
-              <span className="text-base sm:text-lg ml-1" style={{ color: '#848E9C' }}>USDT</span>
+              <span className="text-base sm:text-lg ml-1" style={{ color: '#848E9C' }}>OKXUSDT</span>
             </span>
             <div className="flex items-center gap-2 flex-wrap">
               <span
@@ -184,7 +184,7 @@ export function EquityChart({ traderId }: EquityChartProps) {
                 {currentValue.raw_pnl_pct}%
               </span>
               <span className="text-xs sm:text-sm mono" style={{ color: '#848E9C' }}>
-                ({isProfit ? '+' : ''}{currentValue.raw_pnl.toFixed(2)} USDT)
+                ({isProfit ? '+' : ''}{currentValue.raw_pnl.toFixed(2)} OKXUSDT)
               </span>
             </div>
           </div>

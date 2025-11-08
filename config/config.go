@@ -1,10 +1,12 @@
 package config
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"time"
+    "encoding/json"
+    "fmt"
+    "log"
+    "os"
+    "time"
+    "strings"
 )
 
 // TraderConfig 鍗曚釜trader鐨勯厤缃?
@@ -72,15 +74,27 @@ type Config struct {
 
 // LoadConfig 浠庢枃浠跺姞杞介厤缃?
 func LoadConfig(filename string) (*Config, error) {
-	data, err := os.ReadFile(filename)
-	if err != nil {
-		return nil, fmt.Errorf("璇诲彇閰嶇疆鏂囦欢澶辫触: %w", err)
-	}
+    data, err := os.ReadFile(filename)
+    if err != nil {
+        return nil, fmt.Errorf("璇诲彇閰嶇疆鏂囦欢澶辫触: %w", err)
+    }
 
-	var config Config
-	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, fmt.Errorf("瑙ｆ瀽閰嶇疆鏂囦欢澶辫触: %w", err)
-	}
+    var config Config
+    if err := json.Unmarshal(data, &config); err != nil {
+        return nil, fmt.Errorf("瑙ｆ瀽閰嶇疆鏂囦欢澶辫触: %w", err)
+    }
+
+    // Debug: 打印未校验前的每个 Trader 的扫描间隔
+    log.Printf("[Config] Loaded file: %s, traders=%d", filename, len(config.Traders))
+    // 仅打印包含关键字段的原始文本行，便于比对实际读取的配置
+    for _, line := range strings.Split(string(data), "\n") {
+        if strings.Contains(line, "scan_interval_minutes") || strings.Contains(line, "default_coins") {
+            log.Printf("[Config] Raw line: %s", strings.TrimSpace(line))
+        }
+    }
+    for _, t := range config.Traders {
+        log.Printf("[Config] Pre-validate trader '%s' scan_interval_minutes=%d ai_model=%s exchange=%s", t.ID, t.ScanIntervalMinutes, t.AIModel, t.Exchange)
+    }
 
 	// 璁剧疆榛樿鍊硷細濡傛灉use_default_coins鏈缃紙涓篺alse锛変笖娌℃湁閰嶇疆coin_pool_api_url锛屽垯榛樿浣跨敤榛樿甯佺鍒楄〃
 	if !config.UseDefaultCoins && config.CoinPoolAPIURL == "" {
@@ -101,12 +115,17 @@ func LoadConfig(filename string) (*Config, error) {
 		}
 	}
 
-	// 楠岃瘉閰嶇疆
-	if err := config.Validate(); err != nil {
-		return nil, fmt.Errorf("閰嶇疆楠岃瘉澶辫触: %w", err)
-	}
+    // 楠岃瘉閰嶇疆
+    if err := config.Validate(); err != nil {
+        return nil, fmt.Errorf("閰嶇疆楠岃瘉澶辫触: %w", err)
+    }
 
-	return &config, nil
+    // Debug: 打印校验后的每个 Trader 的扫描间隔（若为0，会被设置为3）
+    for _, t := range config.Traders {
+        log.Printf("[Config] Post-validate trader '%s' scan_interval_minutes=%d (interval=%s)", t.ID, t.ScanIntervalMinutes, t.GetScanInterval())
+    }
+
+    return &config, nil
 }
 
 // Validate 楠岃瘉閰嶇疆鏈夋晥鎬?

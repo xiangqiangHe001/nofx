@@ -64,11 +64,14 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
 	}
 
-	// 鍒涘缓trader瀹炰緥
-	at, err := trader.NewAutoTrader(traderConfig)
-	if err != nil {
-		return fmt.Errorf("鍒涘缓trader澶辫触: %w", err)
-	}
+    // Debug: 打印当前 trader 的扫描间隔配置与换算后的值
+    log.Printf("[Manager] AddTrader '%s' (%s): scan_interval_minutes=%d -> interval=%s", cfg.ID, cfg.Name, cfg.ScanIntervalMinutes, cfg.GetScanInterval())
+
+    // 鍒涘缓trader瀹炰緥
+    at, err := trader.NewAutoTrader(traderConfig)
+    if err != nil {
+        return fmt.Errorf("鍒涘缓trader澶辫触: %w", err)
+    }
 
     tm.traders[cfg.ID] = at
     log.Printf("✅ Trader '%s' (%s) 已添加", cfg.Name, cfg.AIModel)

@@ -766,12 +766,16 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
 
   // 提取余额不足与数值信息（required/available）
   const logs: string[] = (decision as any)?.execution_log || [];
+  // 仅从执行日志判断交易账户的“余额不足”（避免将AI服务商的配额不足误判为USDT余额不足）
   const hasInsufficient = (() => {
-    const keywords = [/INSUFFICIENT_BALANCE/i, /insufficient/i, /余额不足/];
-    const inError = keywords.some((re) => re.test(String((decision as any)?.error_message || '')));
+    const keywords = [/INSUFFICIENT_BALANCE/i, /余额不足/, /insufficient margin/i, /min margin/i];
     const inLogs = logs.some((l) => keywords.some((re) => re.test(String(l))));
-    return inError || inLogs;
+    return inLogs;
   })();
+
+  // 识别AI服务商配额/余额不足（如 403 和 code:30001 提示），用于单独提示
+  const aiErrorText: string = String((decision as any)?.error_message || (decision as any)?.ErrorMessage || '');
+  const isAIQuotaError = /status\s*403/i.test(aiErrorText) && ( /account balance is insufficient/i.test(aiErrorText) || /code\s*[:=]\s*30001/.test(aiErrorText) );
 
   const extractRequiredAvailable = (): { required?: number; available?: number } => {
     const required = (decision as any)?.required_margin ?? (decision as any)?.RequiredMargin;
@@ -908,6 +912,16 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
         >
           余额不足，已跳过开仓；所需: {requiredFinal !== undefined ? Number(requiredFinal).toFixed(2) : '—'} USDT，
           可用: {availableFinal !== undefined ? Number(availableFinal).toFixed(2) : '—'} USDT
+        </div>
+      )}
+
+      {/* AI服务商配额不足提示（与交易USDT余额不足区分） */}
+      {isAIQuotaError && (
+        <div
+          className="mb-2 px-3 py-2 rounded text-xs font-semibold"
+          style={{ background: 'rgba(246, 70, 93, 0.12)', color: '#F6465D', border: '1px solid rgba(246, 70, 93, 0.35)' }}
+        >
+          AI服务配额不足，无法获取本周期决策；请检查密钥或套餐状态（HTTP 403）。
         </div>
       )}
 
