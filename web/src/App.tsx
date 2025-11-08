@@ -658,7 +658,12 @@ function PlainSuggestionsFooter({ latestRecord }: { latestRecord: any }) {
   try {
     if (decisionJSON && typeof decisionJSON === 'string') {
       const parsed = JSON.parse(decisionJSON);
-      if (Array.isArray(parsed)) suggestions = parsed;
+      if (Array.isArray(parsed)) {
+        suggestions = parsed;
+      } else if (parsed && typeof parsed === 'object') {
+        const arr = (parsed as any)?.decisions || (parsed as any)?.Decisions;
+        if (Array.isArray(arr)) suggestions = arr;
+      }
     }
   } catch (e) {
     suggestions = [];
@@ -705,10 +710,15 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
     // 尝试从 decision_json 解析
     let suggestions: any[] = [];
     try {
-      const raw = (decision as any)?.decision_json;
+      const raw = (decision as any)?.decision_json || (decision as any)?.DecisionJSON;
       if (raw && typeof raw === 'string') {
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) suggestions = parsed;
+        if (Array.isArray(parsed)) {
+          suggestions = parsed;
+        } else if (parsed && typeof parsed === 'object') {
+          const arr = (parsed as any)?.decisions || (parsed as any)?.Decisions;
+          if (Array.isArray(arr)) suggestions = arr;
+        }
       }
     } catch {
       suggestions = [];
@@ -719,6 +729,9 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
         action: String(s?.action || s?.Action || 'wait'),
         leverage: Number(s?.leverage || s?.Leverage || 0),
         price: Number(s?.price || s?.Price || 0),
+        // 兼容字段：用于计算所需保证金
+        quantity: Number(s?.quantity || s?.Quantity || 0),
+        position_size_usd: Number(s?.position_size_usd || s?.PositionSizeUSD || 0),
         success: Boolean(decision?.success),
       }));
     }
@@ -736,6 +749,20 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
 
   // 账户摘要（若有）
   const account = (decision as any)?.account_state || (decision as any)?.AccountState;
+
+  // 规范化顶层常用字段（timestamp、success、execution_log、error_message）
+  const normalizedTimestamp: string = (() => {
+    const ts = (decision as any)?.timestamp || (decision as any)?.Timestamp;
+    return ts ? String(ts) : '';
+  })();
+  const normalizedSuccess: boolean = Boolean((decision as any)?.success ?? (decision as any)?.Success);
+  const normalizedExecutionLog: string[] = (() => {
+    const raw = (decision as any)?.execution_log ?? (decision as any)?.ExecutionLog;
+    if (Array.isArray(raw)) return raw.map((x) => String(x));
+    if (typeof raw === 'string' && raw.length > 0) return [raw];
+    return [];
+  })();
+  const normalizedErrorMessage: string | undefined = (decision as any)?.error_message ?? (decision as any)?.ErrorMessage;
 
   // 提取余额不足与数值信息（required/available）
   const logs: string[] = (decision as any)?.execution_log || [];
@@ -774,8 +801,13 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
     if (!actions || actions.length === 0) return undefined;
     const open = actions.find((a) => String(a.action).toLowerCase().includes('open')) || actions[0];
     const qty = Number((open as any)?.quantity || 0);
-    const price = Number(open?.price || 0);
-    const lev = Number(open?.leverage || 1);
+    const price = Number((open as any)?.price || 0);
+    const lev = Number((open as any)?.leverage || 0);
+    const posUSD = Number((open as any)?.position_size_usd || 0);
+
+    // 优先使用 PositionSizeUSD / leverage 计算保证金
+    if (posUSD > 0 && lev > 0) return posUSD / lev;
+    // 回退到数量 * 价格 / leverage
     if (qty > 0 && price > 0 && lev > 0) return (qty * price) / lev;
     return undefined;
   };
@@ -798,19 +830,19 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
       {/* Header */}
       <div className="flex items-start justify-between mb-3">
         <div>
-          <div className="font-semibold" style={{ color: '#EAECEF' }}>{t('cycle', language)} #{decision.cycle_number}</div>
+          <div className="font-semibold" style={{ color: '#EAECEF' }}>{t('cycle', language)} #{(decision as any)?.cycle_number ?? (decision as any)?.CycleNumber}</div>
           <div className="text-xs" style={{ color: '#848E9C' }}>
-            {new Date((decision as any).timestamp).toLocaleString()}
+            {normalizedTimestamp ? new Date(normalizedTimestamp).toLocaleString() : '—'}
           </div>
         </div>
         <div
           className="px-3 py-1 rounded text-xs font-bold"
-          style={decision.success
+          style={normalizedSuccess
             ? { background: 'rgba(14, 203, 129, 0.1)', color: '#0ECB81' }
             : { background: 'rgba(246, 70, 93, 0.1)', color: '#F6465D' }
           }
         >
-          {t(decision.success ? 'success' : 'failed', language)}
+          {t(normalizedSuccess ? 'success' : 'failed', language)}
         </div>
       </div>
 
@@ -898,8 +930,8 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
               {(a.price ?? 0) > 0 && (
                 <span className="font-mono text-xs" style={{ color: '#848E9C' }}>@{Number(a.price).toFixed(4)}</span>
               )}
-              <span style={{ color: a.success ? '#0ECB81' : '#F6465D' }}>
-                {a.success ? '✓' : '✗'}
+              <span style={{ color: (a.success ?? normalizedSuccess) ? '#0ECB81' : '#F6465D' }}>
+                {(a.success ?? normalizedSuccess) ? '✓' : '✗'}
               </span>
               {a.error && <span className="text-xs ml-2" style={{ color: '#F6465D' }}>{a.error}</span>}
             </div>
@@ -910,9 +942,9 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
       {/* 移除：DecisionCard 内部账户摘要行 */}
 
       {/* Execution Logs */}
-      {decision.execution_log && decision.execution_log.length > 0 && (
+      {normalizedExecutionLog.length > 0 && (
         <div className="space-y-1">
-          {decision.execution_log.map((log, k) => (
+          {normalizedExecutionLog.map((log, k) => (
             <div
               key={k}
               className="text-xs font-mono"
@@ -927,9 +959,9 @@ function DecisionCard({ decision, language }: { decision: DecisionRecord; langua
       {/* 移除：DecisionCard 底部的简版建议行 */}
 
       {/* Error Message */}
-      {decision.error_message && (
+      {normalizedErrorMessage && (
         <div className="text-sm rounded px-3 py-2 mt-3" style={{ color: '#F6465D', background: 'rgba(246, 70, 93, 0.1)' }}>
-          ❌ {decision.error_message}
+          ❌ {normalizedErrorMessage}
         </div>
       )}
     </div>
