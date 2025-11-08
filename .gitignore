@@ -3,6 +3,14 @@
 *.iml
 *.xml
 
+# Local decision logs (centralized path)
+trade/decision_logs/
+
+# Root decision logs (legacy path)
+decision_logs/
+
+# Local sensitive config (do not push secrets)
+trade/config.json
 # 编译产物
 nofx-auto
 *.exe

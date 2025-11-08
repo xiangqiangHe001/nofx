@@ -4,6 +4,7 @@ import (
     "fmt"
     "log"
     "net/http"
+    "nofx/config"
     "nofx/manager"
     "nofx/trader"
     "sort"
@@ -16,13 +17,14 @@ import (
 
 // Server HTTP API服务器
 type Server struct {
-	router        *gin.Engine
-	traderManager *manager.TraderManager
-	port          int
+    router        *gin.Engine
+    traderManager *manager.TraderManager
+    port          int
+    cfg           *config.Config
 }
 
 // NewServer 创建API服务器
-func NewServer(traderManager *manager.TraderManager, port int) *Server {
+func NewServer(traderManager *manager.TraderManager, port int, cfg *config.Config) *Server {
     // 设置为Release模式（减少日志输出）
     gin.SetMode(gin.ReleaseMode)
 
@@ -34,14 +36,17 @@ func NewServer(traderManager *manager.TraderManager, port int) *Server {
     router.Use(requestIDMiddleware())
     router.Use(requestLogger())
 
-	s := &Server{
-		router:        router,
-		traderManager: traderManager,
-		port:          port,
-	}
+    s := &Server{
+        router:        router,
+        traderManager: traderManager,
+        port:          port,
+        cfg:           cfg,
+    }
 
     // 设置路由
     s.setupRoutes()
+    // 仅在外部兼容开关开启时注册可选路由（默认不开启，不影响现有行为）
+    s.setupExternalCompatRoutes()
 
     // 静态站点：仅挂载 assets 目录，避免与 /api 路由冲突
     router.Static("/assets", "./web/dist/assets")
@@ -59,6 +64,20 @@ func NewServer(traderManager *manager.TraderManager, port int) *Server {
     })
 
     return s
+}
+
+// setupExternalCompatRoutes 外部兼容路由扩展点（默认不开启）
+func (s *Server) setupExternalCompatRoutes() {
+    if s.cfg == nil {
+        return
+    }
+    if !s.cfg.ExternalCompat.Enable || !s.cfg.ExternalCompat.API {
+        return
+    }
+    // 在开关开启时，可按需注册附加的兼容路由。
+    // 示例（保持注释，避免默认行为变化）：
+    // api := s.router.Group("/api")
+    // api.GET("/compat/ping", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"ok": true}) })
 }
 
 // corsMiddleware CORS中间件
@@ -690,8 +709,18 @@ func (s *Server) handlePerformance(c *gin.Context) {
         return
     }
 
-    // 分析最近较大窗口的交易表现（扩大到100个周期，避免短期“观望”导致数据为空）
-    performance, err := trader.GetDecisionLogger().AnalyzePerformance(100)
+    // 支持通过查询参数 cycles 指定分析周期上限，默认100，最大5000
+    cycles := 100
+    if cs := c.Query("cycles"); cs != "" {
+        if v, e := strconv.Atoi(cs); e == nil && v > 0 {
+            cycles = v
+        }
+    }
+    if cycles > 5000 {
+        cycles = 5000
+    }
+    // 使用持久化决策日志进行分析，确保支持大窗口（最多5000周期）
+    performance, err := trader.GetDecisionLogger().AnalyzePerformance(cycles)
     if err != nil {
         c.JSON(http.StatusInternalServerError, gin.H{
             "error": fmt.Sprintf("分析历史表现失败: %v", err),

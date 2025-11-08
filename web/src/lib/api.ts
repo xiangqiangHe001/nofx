@@ -102,9 +102,13 @@ export const api = {
   },
 
   // 获取AI学习表现分析（支持trader_id）
-  async getPerformance(traderId?: string): Promise<any> {
-    const url = traderId
-      ? `${API_BASE}/performance?trader_id=${traderId}`
+  async getPerformance(traderId?: string, cycles?: number): Promise<any> {
+    const params = new URLSearchParams();
+    if (traderId) params.set('trader_id', traderId);
+    if (cycles && cycles > 0) params.set('cycles', String(cycles));
+    const query = params.toString();
+    const url = query
+      ? `${API_BASE}/performance?${query}`
       : `${API_BASE}/performance`;
     const res = await fetch(url);
     if (!res.ok) throw new Error('获取AI学习数据失败');

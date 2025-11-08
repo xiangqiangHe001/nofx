@@ -72,7 +72,8 @@ type DecisionLogger struct {
 // NewDecisionLogger 创建决策日志记录器
 func NewDecisionLogger(logDir string) *DecisionLogger {
     if logDir == "" {
-        logDir = "decision_logs"
+        // 默认改为 trade/decision_logs，避免产生多个日志根目录
+        logDir = filepath.Join("trade", "decision_logs")
     }
 
 	// 确保日志目录存在

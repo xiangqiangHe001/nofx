@@ -121,7 +121,7 @@ func main() {
             log.Printf("⚙️ 使用环境变量 API_PORT=%d 覆盖配置端口", port)
         }
     }
-    apiServer := api.NewServer(traderManager, port)
+    apiServer := api.NewServer(traderManager, port, cfg)
 	go func() {
 		if err := apiServer.Start(); err != nil {
 			log.Printf("❌ API服务器错误: %v", err)

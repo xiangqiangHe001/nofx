@@ -66,16 +66,30 @@ type LeverageConfig struct {
 
 // Config 鎬婚厤缃?
 type Config struct {
-	Traders            []TraderConfig `json:"traders"`
-	UseDefaultCoins    bool           `json:"use_default_coins"` // 鏄惁浣跨敤榛樿涓绘祦甯佺鍒楄〃
-	DefaultCoins       []string       `json:"default_coins"`     // 榛樿涓绘祦甯佺姹?
-	CoinPoolAPIURL     string         `json:"coin_pool_api_url"`
-	OITopAPIURL        string         `json:"oi_top_api_url"`
-	APIServerPort      int            `json:"api_server_port"`
-	MaxDailyLoss       float64        `json:"max_daily_loss"`
-	MaxDrawdown        float64        `json:"max_drawdown"`
-	StopTradingMinutes int            `json:"stop_trading_minutes"`
-	Leverage           LeverageConfig `json:"leverage"` // 鏉犳潌閰嶇疆
+    Traders            []TraderConfig `json:"traders"`
+    UseDefaultCoins    bool           `json:"use_default_coins"` // 鏄惁浣跨敤榛樿涓绘祦甯佺鍒楄〃
+    DefaultCoins       []string       `json:"default_coins"`     // 榛樿涓绘祦甯佺姹?
+    CoinPoolAPIURL     string         `json:"coin_pool_api_url"`
+    OITopAPIURL        string         `json:"oi_top_api_url"`
+    APIServerPort      int            `json:"api_server_port"`
+    MaxDailyLoss       float64        `json:"max_daily_loss"`
+    MaxDrawdown        float64        `json:"max_drawdown"`
+    StopTradingMinutes int            `json:"stop_trading_minutes"`
+    Leverage           LeverageConfig `json:"leverage"` // 鏉犳潌閰嶇疆
+    // 外部仓库兼容适配总开关与模块级开关（默认全部关闭，保证现有行为不变）
+    ExternalCompat     ExternalCompatConfig `json:"external_compat"`
+}
+
+// ExternalCompatConfig 外部仓库适配开关（全部默认关闭）
+type ExternalCompatConfig struct {
+    Enable   bool `json:"external_compat_enable"`
+    API      bool `json:"external_compat_api"`
+    Trader   bool `json:"external_compat_trader"`
+    Decision bool `json:"external_compat_decision"`
+    Market   bool `json:"external_compat_market"`
+    Web      bool `json:"external_compat_web"`
+    Logger   bool `json:"external_compat_logger"`
+    Database bool `json:"external_compat_database"`
 }
 
 // LoadConfig 浠庢枃浠跺姞杞介厤缃?
@@ -209,6 +223,14 @@ func (c *Config) Validate() error {
     if c.Leverage.AltcoinLeverage <= 0 {
         c.Leverage.AltcoinLeverage = 5
     }
+
+    // ExternalCompat 默认全部关闭（布尔零值即为false，此处仅强调保持现状）
+    // c.ExternalCompat.Enable = c.ExternalCompat.Enable && false
+    // c.ExternalCompat.API = c.ExternalCompat.API && false
+    // c.ExternalCompat.Trader = c.ExternalCompat.Trader && false
+    // c.ExternalCompat.Decision = c.ExternalCompat.Decision && false
+    // c.ExternalCompat.Market = c.ExternalCompat.Market && false
+    // c.ExternalCompat.Web = c.ExternalCompat.Web && false
 
     return nil
 }
