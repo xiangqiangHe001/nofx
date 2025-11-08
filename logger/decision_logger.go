@@ -72,14 +72,40 @@ type DecisionLogger struct {
 // NewDecisionLogger 创建决策日志记录器
 func NewDecisionLogger(logDir string) *DecisionLogger {
     if logDir == "" {
-        // 默认改为 trade/decision_logs，避免产生多个日志根目录
-        logDir = filepath.Join("trade", "decision_logs")
+        // 默认统一为项目根目录下的 decision_logs
+        logDir = filepath.Join("decision_logs")
     }
 
-	// 确保日志目录存在
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		fmt.Printf("⚠ 创建日志目录失败: %v\n", err)
-	}
+    // 确保日志目录存在
+    if err := os.MkdirAll(logDir, 0755); err != nil {
+        fmt.Printf("⚠ 创建日志目录失败: %v\n", err)
+    }
+
+    // 兼容迁移：如果存在旧目录 trade/decision_logs(<trader_id>)，迁移到新的 decision_logs(<trader_id>)
+    // 说明：当 logDir 形如 decision_logs/<id> 时，旧目录对应 trade/decision_logs/<id>
+    //       当 logDir 正好是 decision_logs 时，旧目录对应 trade/decision_logs
+    oldRoot := filepath.Join("trade", "decision_logs")
+    base := filepath.Base(logDir)
+    oldPath := oldRoot
+    if base != "decision_logs" {
+        oldPath = filepath.Join(oldRoot, base)
+    }
+    if oldStat, err := os.Stat(oldPath); err == nil && oldStat.IsDir() && oldPath != logDir {
+        if files, err := ioutil.ReadDir(oldPath); err == nil {
+            for _, f := range files {
+                if f.IsDir() {
+                    continue
+                }
+                src := filepath.Join(oldPath, f.Name())
+                dst := filepath.Join(logDir, f.Name())
+                // 仅在目标不存在时迁移，避免覆盖
+                if _, err := os.Stat(dst); os.IsNotExist(err) {
+                    _ = os.Rename(src, dst)
+                }
+            }
+            fmt.Printf("📦 已迁移旧决策日志目录 %s -> %s\n", oldPath, logDir)
+        }
+    }
 
     l := &DecisionLogger{
         logDir:      logDir,

@@ -3,10 +3,7 @@
 *.iml
 *.xml
 
-# Local decision logs (centralized path)
-trade/decision_logs/
-
-# Root decision logs (legacy path)
+# 决策日志（统一根目录）
 decision_logs/
 
 # Local sensitive config (do not push secrets)
@@ -37,8 +34,7 @@ Thumbs.db
 .env
 config.json
 
-# 决策日志
-decision_logs/
+# 决策缓存
 coin_pool_cache/
 nofx_test
 

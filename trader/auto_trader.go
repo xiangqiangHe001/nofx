@@ -180,9 +180,9 @@ case "binance":
 		return nil, fmt.Errorf("初始金额必须大于0，请在配置中设置InitialBalance")
 	}
 
-    // 初始化决策日志记录器（使用trader ID创建独立目录，统一到 trade/decision_logs）
-    logDir := filepath.Join("trade", "decision_logs", config.ID)
-	decisionLogger := logger.NewDecisionLogger(logDir)
+    // 初始化决策日志记录器（使用trader ID创建独立目录，统一到项目根 decision_logs）
+    logDir := filepath.Join("decision_logs", config.ID)
+    decisionLogger := logger.NewDecisionLogger(logDir)
 
     at := &AutoTrader{
         id:                   config.ID,
