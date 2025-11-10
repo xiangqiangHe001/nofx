@@ -3,6 +3,7 @@ param(
     [int]$FrontPort = $(if ($env:NOFX_FRONT_PORT) { [int]$env:NOFX_FRONT_PORT } else { 3000 }),
     [string]$ConfigPath,
     [string]$PromptVariant = $(if ($env:NOFX_PROMPT_VARIANT) { $env:NOFX_PROMPT_VARIANT } else { 'zhugefan' }),
+    [int]$ScanMinutesOverride = 0,
     [switch]$InlineRun
 )
 
@@ -88,6 +89,43 @@ Stop-ProjectRelatedProcesses
 
 # 2) 启动后端
 Write-Host "== Step 2: Start backend ==" -ForegroundColor Cyan
+
+# 从配置读取 scan_interval_minutes 并导出环境变量，确保后端按最新配置生效
+$scanMinutes = $null
+# 优先使用已有环境变量（如果用户/外层已设置）
+if ($ScanMinutesOverride -gt 0) {
+    $scanMinutes = $ScanMinutesOverride
+    Write-Host "Param ScanMinutesOverride=$scanMinutes (will be used)" -ForegroundColor Yellow
+    Set-Item env:NOFX_SCAN_INTERVAL_MINUTES $scanMinutes
+}
+elseif ($env:NOFX_SCAN_INTERVAL_MINUTES) {
+    $parsed = 0
+    [int]::TryParse($env:NOFX_SCAN_INTERVAL_MINUTES, [ref]$parsed) | Out-Null
+    if ($parsed -gt 0) {
+        $scanMinutes = $parsed
+        Write-Host "Env NOFX_SCAN_INTERVAL_MINUTES=$scanMinutes (will be used)" -ForegroundColor Yellow
+    }
+}
+
+# 若无有效 env，再从配置读取
+if (-not $scanMinutes) {
+    if (Test-Path -LiteralPath $ConfigPath) {
+        $rawJson = Get-Content -LiteralPath $ConfigPath -Raw
+        if ($rawJson) {
+            $cfgObj = $rawJson | ConvertFrom-Json
+            if ($cfgObj -and $cfgObj.traders -and $cfgObj.traders.Count -gt 0) {
+                $scanMinutes = [int]$cfgObj.traders[0].scan_interval_minutes
+            }
+        }
+    }
+    if ($scanMinutes -and $scanMinutes -gt 0 -and -not $ScanMinutesOverride) {
+        Write-Host "Config '$ConfigPath' scan_interval_minutes=$scanMinutes (export to env)" -ForegroundColor Yellow
+        Set-Item env:NOFX_SCAN_INTERVAL_MINUTES $scanMinutes
+    } else {
+        Write-Host "Config '$ConfigPath' has no valid scan_interval_minutes; skip env override" -ForegroundColor DarkYellow
+    }
+}
+
 $backendCmd = "Set-Item env:API_PORT $ApiPort; Set-Item env:NOFX_PROMPT_VARIANT '$PromptVariant'; cd '$PSScriptRoot'; go run . '$ConfigPath'"
 Write-Host "Backend command: $backendCmd" -ForegroundColor Green
 $backendProc = Start-Process -FilePath "powershell" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command $backendCmd" -WorkingDirectory $PSScriptRoot -PassThru
