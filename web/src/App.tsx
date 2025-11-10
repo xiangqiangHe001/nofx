@@ -89,6 +89,20 @@ function App() {
     }
   );
 
+  // 前端调试日志：显示提示词模板名称与扫描间隔生效时间
+  useEffect(() => {
+    if (status) {
+      const variant = status.prompt_variant ?? 'default';
+      const minutes = status.scan_interval_minutes ?? undefined;
+      const effectiveAt = status.scan_interval_effective_at ?? undefined;
+      console.log(
+        `[Frontend] Prompt variant: ${variant}` +
+        (minutes !== undefined ? ` | scan_interval_minutes: ${minutes}` : '') +
+        (effectiveAt ? ` | effective_at: ${effectiveAt}` : '')
+      );
+    }
+  }, [status]);
+
   // 独立轮询执行开关状态（更快同步UI），避免受状态接口缓存影响
   const { data: execution, mutate: mutateExecution } = useSWR<{ execution_enabled: boolean }>(
     currentPage === 'trader' && selectedTraderId ? `execution-${selectedTraderId}` : null,
@@ -656,41 +670,7 @@ function StatCard({
   );
 }
 
-// 纯文本底部建议：仅基于 decision_json 输出“SYMBOL ACTION”行
-function PlainSuggestionsFooter({ latestRecord }: { latestRecord: any }) {
-  const decisionJSON: string = latestRecord?.decision_json || latestRecord?.DecisionJSON || '';
-  let suggestions: any[] = [];
-  try {
-    if (decisionJSON && typeof decisionJSON === 'string') {
-      const parsed = JSON.parse(decisionJSON);
-      if (Array.isArray(parsed)) {
-        suggestions = parsed;
-      } else if (parsed && typeof parsed === 'object') {
-        const arr = (parsed as any)?.decisions || (parsed as any)?.Decisions;
-        if (Array.isArray(arr)) suggestions = arr;
-      }
-    }
-  } catch (e) {
-    suggestions = [];
-  }
-
-  if (!suggestions || suggestions.length === 0) return null;
-
-  const normalizeAction = (a: any) => {
-    const v = String(a || '').toLowerCase();
-    if (v === 'buy' || v === 'long' || v === 'open_long') return 'BUY';
-    if (v === 'sell' || v === 'short' || v === 'open_short') return 'SELL';
-    return 'HOLD';
-  };
-
-  const line = suggestions
-    .map((s: any) => `${String(s?.symbol || '-').toUpperCase()} ${normalizeAction(s?.action)}`)
-    .join(' · ');
-
-  return (
-    <div className="text-xs mono" style={{ color: '#848E9C' }}>{line}</div>
-  );
-}
+// 纯文本底部建议组件未使用，移除以消除TS6133未引用警告
 
 // Decision Card Component with CoT Trace - Binance Style
 function DecisionCard({ decision, language }: { decision: DecisionRecord; language: Language }) {

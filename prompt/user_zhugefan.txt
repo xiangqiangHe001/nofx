@@ -1,0 +1,30 @@
+现在请分析并输出决策（先给出简短的思维链，然后给出严格的 JSON）。
+
+输出要求：
+- 仅允许的动作："open_long", "open_short", "close_long", "close_short", "hold", "wait"。
+- 当动作为 "open_long" 或 "open_short" 时，必须给出以下字段：
+  - "position_size_usd"：开仓的美元规模，正数。
+  - "leverage"：杠杆倍数，正数。
+  - "stop_loss"：止损价位（与当前品种价格同一计量单位）。
+  - "take_profit"：一次性止盈价位（与当前品种价格同一计量单位）。
+- 对所有动作均应给出：
+  - "confidence"：0–1 的置信度。
+  - "risk_usd"：本次决策的风险敞口估算（美元）。
+
+请严格输出如下 JSON 数组格式（示例值仅演示，实际请替换为你的决策）：
+[
+  {
+    "action": "open_long",
+    "position_size_usd": 1000,
+    "leverage": 3,
+    "stop_loss": 2.345,
+    "take_profit": 2.789,
+    "confidence": 0.72,
+    "risk_usd": 150
+  }
+]
+
+注意：
+- 不要输出除 JSON 之外的额外内容（JSON 之外的分析请放在前面的思维链部分）。
+- 字段名与大小写必须与示例完全一致。
+- 若决定 "close_long" 或 "close_short"，只需给出上述通用字段（可省略价位字段）。

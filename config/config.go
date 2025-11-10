@@ -80,6 +80,8 @@ type Config struct {
     Leverage           LeverageConfig `json:"leverage"` // 鏉犳潌閰嶇疆
     // 外部仓库兼容适配总开关与模块级开关（默认全部关闭，保证现有行为不变）
     ExternalCompat     ExternalCompatConfig `json:"external_compat"`
+    // 运行期调试：记录实际加载的配置文件路径（不参与JSON序列化）
+    LoadedFile         string `json:"-"`
 }
 
 // ExternalCompatConfig 外部仓库适配开关（全部默认关闭）
@@ -105,6 +107,9 @@ func LoadConfig(filename string) (*Config, error) {
     if err := json.Unmarshal(data, &config); err != nil {
         return nil, fmt.Errorf("瑙ｆ瀽閰嶇疆鏂囦欢澶辫触: %w", err)
     }
+
+    // 记录实际加载的配置文件路径，便于后端调试接口返回
+    config.LoadedFile = filename
 
     // Debug: 打印未校验前的每个 Trader 的扫描间隔
     log.Printf("[Config] Loaded file: %s, traders=%d", filename, len(config.Traders))

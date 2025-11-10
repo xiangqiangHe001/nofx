@@ -8,10 +8,15 @@ export interface SystemStatus {
   call_count: number;
   initial_balance: number;
   scan_interval: string;
+  // 新增：扫描间隔分钟数与其生效时间（后端提供）
+  scan_interval_minutes?: number;
+  scan_interval_effective_at?: string;
   stop_until: string;
   last_reset_time: string;
   ai_provider: string;
   execution_enabled: boolean;
+  // 新增：当前使用的提示词模板变体名
+  prompt_variant?: string;
 }
 
 export interface AccountInfo {

@@ -1,15 +1,13 @@
 package mcp
 
 import (
-    "bytes"
-    "encoding/json"
-    "fmt"
-    "io"
-    "net/http"
-    "net/url"
-    "strings"
-    "time"
-    "os"
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+	"time"
 )
 
 // Provider AI提供商类型
@@ -23,44 +21,24 @@ const (
 
 // Client AI API配置
 type Client struct {
-    Provider   Provider
-    APIKey     string
-    SecretKey  string // 阿里云需要
-    BaseURL    string
-    Model      string
-    Timeout    time.Duration
-    UseFullURL bool // 是否使用完整URL（不添加/chat/completions）
-    // 代理控制
-    DisableProxy        bool     // 禁用系统代理（仅对AI调用生效）
-    ProxyBypassDomains  []string // 指定域名绕过代理（精确或后缀匹配）
+	Provider   Provider
+	APIKey     string
+	SecretKey  string // 阿里云需要
+	BaseURL    string
+	Model      string
+	Timeout    time.Duration
+	UseFullURL bool // 是否使用完整URL（不添加/chat/completions）
 }
 
 func New() *Client {
-    // 默认配置
-    var defaultClient = Client{
-        Provider: ProviderDeepSeek,
-        BaseURL:  "https://api.deepseek.com/v1",
-        Model:    "deepseek-chat",
-        Timeout:  120 * time.Second, // 增加到120秒，因为AI需要分析大量数据
-        DisableProxy: false,
-        ProxyBypassDomains: []string{"localhost", "127.0.0.1", "::1", "api.deepseek.com", "dashscope.aliyuncs.com"},
-    }
-    // 从环境变量读取代理策略（可选）
-    // NOFX_DISABLE_PROXY=true 将禁用代理
-    if v := strings.TrimSpace(strings.ToLower(os.Getenv("NOFX_DISABLE_PROXY"))); v == "1" || v == "true" || v == "yes" {
-        defaultClient.DisableProxy = true
-    }
-    // NOFX_PROXY_BYPASS=domain1,domain2 追加绕过域
-    if bp := strings.TrimSpace(os.Getenv("NOFX_PROXY_BYPASS")); bp != "" {
-        parts := strings.Split(bp, ",")
-        for _, p := range parts {
-            p = strings.TrimSpace(p)
-            if p != "" {
-                defaultClient.ProxyBypassDomains = append(defaultClient.ProxyBypassDomains, p)
-            }
-        }
-    }
-    return &defaultClient
+	// 默认配置
+	var defaultClient = Client{
+		Provider: ProviderDeepSeek,
+		BaseURL:  "https://api.deepseek.com/v1",
+		Model:    "deepseek-chat",
+		Timeout:  120 * time.Second, // 增加到120秒，因为AI需要分析大量数据
+	}
+	return &defaultClient
 }
 
 // SetDeepSeekAPIKey 设置DeepSeek API密钥
@@ -170,8 +148,7 @@ func (cfg *Client) callOnce(systemPrompt, userPrompt string) (string, error) {
         "model":       cfg.Model,
         "messages":    messages,
         "temperature": 0.2, // 进一步降低temperature以提高格式稳定性
-        // 提升输出上限以容纳更长的分析结果
-        "max_tokens":  5000,
+        "max_tokens":  2000,
     }
 
 	// 注意：response_format 参数仅 OpenAI 支持，DeepSeek/Qwen 不支持
@@ -183,15 +160,15 @@ func (cfg *Client) callOnce(systemPrompt, userPrompt string) (string, error) {
 	}
 
 	// 创建HTTP请求
-    var endpoint string
-    if cfg.UseFullURL {
-        // 使用完整URL，不添加/chat/completions
-        endpoint = cfg.BaseURL
-    } else {
-        // 默认行为：添加/chat/completions
-        endpoint = fmt.Sprintf("%s/chat/completions", cfg.BaseURL)
-    }
-    req, err := http.NewRequest("POST", endpoint, bytes.NewBuffer(jsonData))
+	var url string
+	if cfg.UseFullURL {
+		// 使用完整URL，不添加/chat/completions
+		url = cfg.BaseURL
+	} else {
+		// 默认行为：添加/chat/completions
+		url = fmt.Sprintf("%s/chat/completions", cfg.BaseURL)
+	}
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("创建请求失败: %w", err)
 	}
@@ -210,23 +187,8 @@ func (cfg *Client) callOnce(systemPrompt, userPrompt string) (string, error) {
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", cfg.APIKey))
 	}
 
-    // 发送请求（带代理绕过控制）
-    transport := &http.Transport{
-        Proxy: func(req *http.Request) (*url.URL, error) {
-            if cfg.DisableProxy {
-                return nil, nil
-            }
-            host := req.URL.Hostname()
-            for _, d := range cfg.ProxyBypassDomains {
-                if strings.EqualFold(host, d) || strings.HasSuffix(host, d) {
-                    return nil, nil
-                }
-            }
-            return http.ProxyFromEnvironment(req)
-        },
-        // 其余参数使用默认，避免自定义过多引入副作用
-    }
-    client := &http.Client{Timeout: cfg.Timeout, Transport: transport}
+	// 发送请求
+	client := &http.Client{Timeout: cfg.Timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("发送请求失败: %w", err)

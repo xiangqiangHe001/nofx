@@ -146,6 +146,9 @@ func (s *Server) setupRoutes() {
         // 竞赛总览
         api.GET("/competition", s.handleCompetition)
 
+        // 调试：当前加载配置与trader列表来源
+        api.GET("/debug/config", s.handleDebugConfig)
+
         // Trader列表
         api.GET("/traders", s.handleTraderList)
 
@@ -223,8 +226,8 @@ func (s *Server) handleCompetition(c *gin.Context) {
 
 // handleTraderList trader列表
 func (s *Server) handleTraderList(c *gin.Context) {
-	traders := s.traderManager.GetAllTraders()
-	result := make([]map[string]interface{}, 0, len(traders))
+    traders := s.traderManager.GetAllTraders()
+    result := make([]map[string]interface{}, 0, len(traders))
 
 	for _, t := range traders {
 		result = append(result, map[string]interface{}{
@@ -235,6 +238,31 @@ func (s *Server) handleTraderList(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, result)
+}
+
+// handleDebugConfig 返回后端当前加载的配置路径与trader来源统计
+func (s *Server) handleDebugConfig(c *gin.Context) {
+    // 从配置对象统计（原始配置文件）
+    cfgCount := 0
+    cfgIDs := make([]string, 0)
+    if s.cfg != nil {
+        cfgCount = len(s.cfg.Traders)
+        for _, t := range s.cfg.Traders {
+            cfgIDs = append(cfgIDs, t.ID)
+        }
+    }
+
+    // 从运行中的管理器统计（启用并成功添加的）
+    mgrIDs := s.traderManager.GetTraderIDs()
+    mgrCount := len(mgrIDs)
+
+    c.JSON(http.StatusOK, gin.H{
+        "config_loaded_file":   func() string { if s.cfg != nil { return s.cfg.LoadedFile } else { return "" } }(),
+        "trader_count_in_config": cfgCount,
+        "trader_ids_in_config":   cfgIDs,
+        "trader_count_in_manager": mgrCount,
+        "trader_ids_in_manager":   mgrIDs,
+    })
 }
 
 // handleCloseAllPositions 清空所有Trader的所有持仓

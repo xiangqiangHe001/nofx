@@ -12,6 +12,7 @@ import (
     "nofx/market"
     "nofx/mcp"
 	"nofx/pool"
+    "nofx/prompt"
     "os"
     "path/filepath"
 	"strings"
@@ -187,6 +188,8 @@ type AutoTrader struct {
     investmentAdjustments []InvestmentAdjustment
     investmentStatePath   string
     lastInvestmentSync    time.Time
+    // 扫描间隔配置的生效时间（用于前端展示“scan_interval_minutes 生效时间”）
+    scanIntervalAppliedAt time.Time
 }
 
 // NewAutoTrader 创建自动交易器
@@ -279,13 +282,14 @@ case "binance":
         decisionLogger:       decisionLogger,
         initialBalance:       config.InitialBalance,
         lastResetTime:        time.Now(),
-		startTime:            time.Now(),
-		callCount:            0,
+        startTime:            time.Now(),
+        callCount:            0,
         isRunning:            false,
         positionFirstSeenTime: make(map[string]int64),
         executionEnabled:     true,
         autoCalibrateBaseline: config.AutoCalibrateInitialBalance,
         calibrationThreshold:  config.CalibrationThreshold,
+        scanIntervalAppliedAt: time.Now(),
     }
 
     // 初始余额持久化加载（可选）
@@ -436,22 +440,33 @@ func (at *AutoTrader) runCycle() error {
 		})
 	}
 
-	// 保存候选币种列表
-	for _, coin := range ctx.CandidateCoins {
-		record.CandidateCoins = append(record.CandidateCoins, coin.Symbol)
-	}
+    // 保存候选币种列表
+    for _, coin := range ctx.CandidateCoins {
+        record.CandidateCoins = append(record.CandidateCoins, coin.Symbol)
+    }
+
+    // 计算回退系统提示词（用于确保日志总是包含 system_prompt 字段）
+    variant := os.Getenv("NOFX_PROMPT_VARIANT")
+    if strings.TrimSpace(variant) == "" {
+        variant = prompt.DefaultVariant
+    }
+    fallbackSystemPrompt := prompt.RenderSystemPrompt(variant, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
 
     log.Printf("Account equity: %.2f USDT | Available: %.2f USDT | Positions: %d",
         ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
 
-	// 4. 调用AI获取完整决策
+    // 4. 调用AI获取完整决策
     log.Println("Requesting AI analysis and decisions...")
     decision, err := decision.GetFullDecisionWithClient(at.aiClient, ctx)
 
-	// 即使有错误，也保存思维链、决策和输入prompt（用于debug）
-	if decision != nil {
-		record.InputPrompt = decision.UserPrompt
-		record.CoTTrace = decision.CoTTrace
+    // 先写入回退系统提示词，确保日志包含该字段（若后续有AI返回则覆盖）
+    record.SystemPrompt = fallbackSystemPrompt
+
+    // 即使有错误，也保存思维链、决策和输入prompt（用于debug）
+    if decision != nil {
+        record.SystemPrompt = decision.SystemPrompt
+        record.InputPrompt = decision.UserPrompt
+        record.CoTTrace = decision.CoTTrace
 		if len(decision.Decisions) > 0 {
 			decisionJSON, _ := json.MarshalIndent(decision.Decisions, "", "  ")
 			record.DecisionJSON = string(decisionJSON)
@@ -1193,10 +1208,16 @@ func (at *AutoTrader) GetDecisionLogger() *logger.DecisionLogger {
 
 // GetStatus 获取系统状态（用于API）
 func (at *AutoTrader) GetStatus() map[string]interface{} {
-	aiProvider := "DeepSeek"
-	if at.config.UseQwen {
-		aiProvider = "Qwen"
-	}
+    aiProvider := "DeepSeek"
+    if at.config.UseQwen {
+        aiProvider = "Qwen"
+    }
+
+    // 读取当前提示词模板变体（环境变量覆盖，默认 zhugefan）
+    variant := os.Getenv("NOFX_PROMPT_VARIANT")
+    if strings.TrimSpace(variant) == "" {
+        variant = prompt.DefaultVariant
+    }
 
     return map[string]interface{}{
         "trader_id":       at.id,
@@ -1209,10 +1230,13 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
         "call_count":      at.callCount,
         "initial_balance": at.initialBalance,
         "scan_interval":   at.config.ScanInterval.String(),
+        "scan_interval_minutes": int(at.config.ScanInterval.Minutes()),
+        "scan_interval_effective_at": at.scanIntervalAppliedAt.Format(time.RFC3339),
         "stop_until":      at.stopUntil.Format(time.RFC3339),
         "last_reset_time": at.lastResetTime.Format(time.RFC3339),
         "ai_provider":     aiProvider,
         "execution_enabled": at.executionEnabled,
+        "prompt_variant":  variant,
     }
 }
 
@@ -1335,6 +1359,7 @@ func (at *AutoTrader) RunAiCloseThenOpen() (map[string]interface{}, error) {
     }
     closeRecord := &logger.DecisionRecord{ExecutionLog: []string{}, Success: true}
     // 补齐提示与思维链，确保前端步骤1可视化
+    closeRecord.SystemPrompt = fullDecision.SystemPrompt
     closeRecord.InputPrompt = fullDecision.UserPrompt
     closeRecord.CoTTrace = fullDecision.CoTTrace
     // 补齐JSON决策数组，确保前端步骤2在无决策时也显示为 []
@@ -1398,6 +1423,7 @@ func (at *AutoTrader) RunAiCloseThenOpen() (map[string]interface{}, error) {
     }
     openRecord := &logger.DecisionRecord{ExecutionLog: []string{}, Success: true}
     // 补齐提示与思维链，确保前端步骤1可视化
+    openRecord.SystemPrompt = fullDecision2.SystemPrompt
     openRecord.InputPrompt = fullDecision2.UserPrompt
     openRecord.CoTTrace = fullDecision2.CoTTrace
     // 补齐JSON决策数组，确保前端步骤2在无决策时也显示为 []

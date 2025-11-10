@@ -1,14 +1,16 @@
 package decision
 
 import (
-	"encoding/json"
-	"fmt"
-	"log"
-	"nofx/market"
-	"nofx/mcp"
-	"nofx/pool"
-	"strings"
-	"time"
+    "encoding/json"
+    "fmt"
+    "log"
+    "nofx/market"
+    "nofx/mcp"
+    "nofx/pool"
+    "nofx/prompt"
+    "os"
+    "strings"
+    "time"
 )
 
 // PositionInfo 持仓信息
@@ -70,36 +72,40 @@ type Context struct {
 
 // Decision AI的交易决策
 type Decision struct {
-	Symbol          string  `json:"symbol"`
-	Action          string  `json:"action"` // "open_long", "open_short", "close_long", "close_short", "hold", "wait"
-	Leverage        int     `json:"leverage,omitempty"`
-	PositionSizeUSD float64 `json:"position_size_usd,omitempty"`
-	StopLoss        float64 `json:"stop_loss,omitempty"`
-	TakeProfit      float64 `json:"take_profit,omitempty"`
-	Confidence      int     `json:"confidence,omitempty"` // 信心度 (0-100)
-	RiskUSD         float64 `json:"risk_usd,omitempty"`   // 最大美元风险
-	Reasoning       string  `json:"reasoning"`
+    Symbol          string  `json:"symbol"`
+    Action          string  `json:"action"` // "open_long", "open_short", "close_long", "close_short", "hold", "wait"
+    Leverage        int     `json:"leverage,omitempty"`
+    PositionSizeUSD float64 `json:"position_size_usd,omitempty"`
+    StopLoss        float64 `json:"stop_loss,omitempty"`
+    TakeProfit      float64 `json:"take_profit,omitempty"`
+    Confidence      float64 `json:"confidence,omitempty"` // 信心度（建议按0–1输出；解析兼容0–100）
+    RiskUSD         float64 `json:"risk_usd,omitempty"`   // 最大美元风险
+    Reasoning       string  `json:"reasoning"`
 }
 
 // FullDecision AI的完整决策（包含思维链）
 type FullDecision struct {
-	UserPrompt string     `json:"user_prompt"` // 发送给AI的输入prompt
-	CoTTrace   string     `json:"cot_trace"`   // 思维链分析（AI输出）
-	Decisions  []Decision `json:"decisions"`   // 具体决策列表
-	Timestamp  time.Time  `json:"timestamp"`
+    SystemPrompt string     `json:"system_prompt"` // 系统提示词（发送给AI的系统prompt）
+    UserPrompt string     `json:"user_prompt"` // 发送给AI的输入prompt
+    CoTTrace   string     `json:"cot_trace"`   // 思维链分析（AI输出）
+    Decisions  []Decision `json:"decisions"`   // 具体决策列表
+    Timestamp  time.Time  `json:"timestamp"`
 }
 
 // GetFullDecision 获取AI的完整交易决策（批量分析所有币种和持仓）
 // 保留原接口：继续使用包级默认客户端（兼容旧调用）
 func GetFullDecision(ctx *Context) (*FullDecision, error) {
-	// 1. 为所有币种获取市场数据
-	if err := fetchMarketDataForContext(ctx); err != nil {
-		return nil, fmt.Errorf("failed to fetch market data: %w", err)
-	}
+    // 1. 为所有币种获取市场数据
+    if err := fetchMarketDataForContext(ctx); err != nil {
+        return nil, fmt.Errorf("failed to fetch market data: %w", err)
+    }
 
-	// 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
-	systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
-	userPrompt := buildUserPrompt(ctx)
+    // 打印当前启用的提示词变体，便于运行时确认
+    log.Printf("[Prompt] Active variant: %s", activePromptVariant())
+
+    // 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
+    systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+    userPrompt := buildUserPrompt(ctx)
 
 	// 3. 调用AI API（使用 system + user prompt）
 	aiResponse, err := mcp.CallWithMessages(systemPrompt, userPrompt)
@@ -114,20 +120,24 @@ func GetFullDecision(ctx *Context) (*FullDecision, error) {
 	}
 
 	decision.Timestamp = time.Now()
+	decision.SystemPrompt = systemPrompt // 保存系统prompt
 	decision.UserPrompt = userPrompt // 保存输入prompt
 	return decision, nil
 }
 
 // GetFullDecisionWithClient 使用指定的AI客户端获取完整交易决策（推荐，避免全局冲突）
 func GetFullDecisionWithClient(client *mcp.Client, ctx *Context) (*FullDecision, error) {
-	// 1. 为所有币种获取市场数据
-	if err := fetchMarketDataForContext(ctx); err != nil {
-		return nil, fmt.Errorf("failed to fetch market data: %w", err)
-	}
+    // 1. 为所有币种获取市场数据
+    if err := fetchMarketDataForContext(ctx); err != nil {
+        return nil, fmt.Errorf("failed to fetch market data: %w", err)
+    }
 
-	// 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
-	systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
-	userPrompt := buildUserPrompt(ctx)
+    // 打印当前启用的提示词变体，便于运行时确认
+    log.Printf("[Prompt] Active variant: %s", activePromptVariant())
+
+    // 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
+    systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+    userPrompt := buildUserPrompt(ctx)
 
 	// 3. 调用AI API（使用 system + user prompt）——使用传入client避免defaultClient被其他trader覆盖
 	aiResponse, err := client.CallWithMessages(systemPrompt, userPrompt)
@@ -142,6 +152,7 @@ func GetFullDecisionWithClient(client *mcp.Client, ctx *Context) (*FullDecision,
 	}
 
 	decision.Timestamp = time.Now()
+	decision.SystemPrompt = systemPrompt // 保存系统prompt
 	decision.UserPrompt = userPrompt // 保存输入prompt
 	return decision, nil
 }
@@ -230,82 +241,12 @@ func calculateMaxCandidates(ctx *Context) int {
 
 // buildSystemPrompt 构建 System Prompt（固定规则，可缓存）
 func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage int) string {
-	var sb strings.Builder
-
-	sb.WriteString("您是一名专业币圈交易员王百万 ，现在家道中落现在需要稳健的翻身方法，遂利用趋势回调+动能确认策略做虚拟货币，主要做BTC、ETH、SOL。\n\n")
-
-	sb.WriteString("一、核心原则（多工具整合，重点扩展维科夫和缠论）\n\n")
-
-	sb.WriteString("目标：在加密货币市场实现稳定盈利，通过趋势确认+动量共振捕捉高概率入场点，严格风险管理，每单固定10%盈利目标。\n\n")
-
-	sb.WriteString("适用市场：加密货币（主攻BTC、ETH、SOL、DOGE、OKB、BNB）。\n\n")
-
-	sb.WriteString("时间框架：1小时图（入场）+ 4小时图（趋势过滤）\n\n")
-
-	sb.WriteString("账户配置：20美金，10倍杠杆，每单风险20%\n\n")
-
-	sb.WriteString("二、多时间框架分析体系\n\n")
-
-	sb.WriteString("趋势判断（4小时图 - 缠论笔段概念）：\n")
-	sb.WriteString("上涨趋势：连续3根4小时K线收盘在EMA(20)上方，且EMA(20)斜率向上\n")
-	sb.WriteString("下跌趋势：连续3根4小时K线收盘在EMA(20)下方，且EMA(20)斜率向下\n")
-	sb.WriteString("震荡趋势：价格在EMA(20)上下穿插，布林带(20,2)收窄\n\n")
-
-	sb.WriteString("动量分析（1小时图 - 维科夫量价原理）：\n\n")
-
-	sb.WriteString("上涨趋势中：缩量回调至支撑 + 放量突破前高 = 做多信号\n")
-	sb.WriteString("下跌趋势中：缩量反弹至阻力 + 放量跌破前低 = 做空信号\n\n")
-
-	sb.WriteString("三、具体交易信号体系\n\n")
-
-	sb.WriteString("做多信号（需同时满足）：\n\n")
-
-	sb.WriteString("趋势层面（4小时）：4小时EMA(20)方向向上，价格在其上方运行4小时布林带中轨向上倾斜，最近一个4小时分型为底分型（缠论概念）。入场层面（1小时）：价格回调至布林带下轨/中轨或斐波那契38.2%-50%支撑位RMI(14)从超卖区(<30)向上反弹，MFI(14)显示资金重新流入成交量在支撑位萎缩，突破时放大，出现看涨反转形态\n\n")
-
-	sb.WriteString("做空信号（需同时满足）：\n\n")
-	sb.WriteString("趋势层面（4小时）：4小时EMA(20)方向向下，价格在其下方运行4小时布林带中轨向下倾斜最近一个4小时分型为顶分型（缠论概念）入场层面（1小时）：价格反弹至布林带上轨/中轨或斐波那契38.2%-50%阻力位RMI(14)从超买区(>70)向下回落，MFI(14)显示资金流出成交量在阻力位萎缩，跌破时放大，出现看跌反转形态\n\n")
-
-	sb.WriteString("精准入场与出场策略\n\n")
-	sb.WriteString("入场时机：做多：价格突破前一根1小时K线高点，且成交量放大；做空：价格跌破前一根1小时K线低点，且成交量放大。\n")
-	sb.WriteString("止损策略：主要止损：入场价下方5-7%（做多）/上方5-7%（做空）；逻辑止损：近期摆动低点下方0.5%（做多）/高点上方0.5%（做空）；时间止损：入场后4-5根K线内未达预期走势，平仓离场\n")
-	sb.WriteString("止盈策略：固定目标：入场价的±10%；移动止损：盈利达5%后，止损移动至保本位\n\n")
-
-	sb.WriteString("五、风险控制系统\n\n")
-	sb.WriteString("每日最大交易次数：3次连续亏损后：亏损2单后暂停交易4小时盈利保护：当日盈利达到15%后停止交易\n\n")
-	sb.WriteString("禁止交易时段：重大经济数据公布前后1小时，周末流动性低迷时段禁止交易条件：4小时图趋势不明确，异常成交量或价格缺口\n\n")
-	sb.WriteString("交易前检查清单：4小时趋势方向明确，1小时图支撑阻力位识别，动量指标共振确认，成交量验证信号有效性，风险计算完整准确，止损止盈订单已设置。\n\n")
-
-	// === 输出格式 ===
-	sb.WriteString("# 📤 输出格式\n\n")
-	sb.WriteString("**第一步: 思维链（纯文本）**\n")
-	sb.WriteString("简洁分析你的思考过程\n\n")
-	sb.WriteString("**第二步: JSON决策数组**\n\n")
-	sb.WriteString("```json\n[\n")
-	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"BTCUSDT\", \"action\": \"open_short\", \"leverage\": %d, \"position_size_usd\": %.0f, \"stop_loss\": 97000, \"take_profit\": 91000, \"confidence\": 85, \"risk_usd\": 300, \"reasoning\": \"下跌趋势+MACD死叉\"},\n", btcEthLeverage, accountEquity*5))
-	sb.WriteString("  {\"symbol\": \"ETHUSDT\", \"action\": \"close_long\", \"reasoning\": \"止盈离场\"}\n")
-	sb.WriteString("]\n```\n\n")
-	sb.WriteString("**字段说明**:\n")
-	sb.WriteString("- `action`: open_long | open_short | close_long | close_short | hold | wait\n")
-	sb.WriteString("- `confidence`: 0-100（开仓建议≥75）\n")
-	sb.WriteString("- 开仓时必填: leverage, position_size_usd, stop_loss, take_profit, confidence, risk_usd, reasoning\n\n")
-
-	// === 严格的JSON约束（防止解析错误）===
-	sb.WriteString("**严格要求**:\n")
-	sb.WriteString("- 必须输出**严格合法的JSON数组**，不要包含注释、尾随逗号、NaN、Infinity、或任何非JSON内容\n")
-	sb.WriteString("- `risk_usd` 必须是**数字字面量**（例如 `300`），**禁止**使用公式或表达式（如 `35 * 10`、`(a+b)/c` 等）\n")
-	sb.WriteString("- 不要在JSON里写分析文字或单位（如 `300 USD`），只允许纯字段值\n")
-	sb.WriteString("- 若暂无法给出有效开仓建议，请输出空数组 `[]`，不要构造无效JSON\n")
-	// 杠杆与风险预算约束
-	sb.WriteString(fmt.Sprintf("- 杠杆原则：BTC/ETH 使用 %dx，其他币使用 %dx\n", btcEthLeverage, altcoinLeverage))
-	// sb.WriteString(fmt.Sprintf("- 风险预算：单笔 risk_usd ≤ %.0f（不超过净值的2%%），position_size_usd 与余额匹配\n", accountEquity*0.02))
-	sb.WriteString("- 若止损/止盈要求与风险预算无法同时满足，则输出 []，并在思维链说明原因\n\n")
-
-	return sb.String()
+    return prompt.RenderSystemPrompt(activePromptVariant(), accountEquity, btcEthLeverage, altcoinLeverage)
 }
 
 // buildUserPrompt 构建 User Prompt（动态数据）
 func buildUserPrompt(ctx *Context) string {
-	var sb strings.Builder
+    var sb strings.Builder
 
 	// 系统状态
 	sb.WriteString(fmt.Sprintf("**时间**: %s | **周期**: #%d | **运行**: %d分钟\n\n",
@@ -410,10 +351,20 @@ func buildUserPrompt(ctx *Context) string {
 		}
 	}
 
-	sb.WriteString("---\n\n")
-	sb.WriteString("现在请分析并输出决策（思维链 + JSON）\n")
+    sb.WriteString(prompt.UserPromptFooter(activePromptVariant()))
 
-	return sb.String()
+    return sb.String()
+}
+
+// activePromptVariant 返回当前启用的提示词变体
+// 通过环境变量 NOFX_PROMPT_VARIANT 覆盖，默认使用 "default"
+// 如果你希望在代码中强制指定某一变体，可直接修改默认值。
+func activePromptVariant() string {
+    if v := os.Getenv("NOFX_PROMPT_VARIANT"); v != "" {
+        return v
+    }
+    // 默认使用项目中定义的提示词变体
+    return prompt.DefaultVariant
 }
 
 // parseFullDecisionResponse 解析AI的完整决策响应
@@ -500,16 +451,45 @@ func extractJSONFromCodeBlock(response string) (string, bool) {
 
 // extractDecisions 提取JSON决策列表
 func extractDecisions(response string) ([]Decision, error) {
-	// 若AI响应包含代码块围栏，优先使用围栏内的内容以提升稳定性
-	if block, ok := extractJSONFromCodeBlock(response); ok {
-		response = block
-	}
+    // 若AI响应包含代码块围栏，优先使用围栏内的内容以提升稳定性
+    if block, ok := extractJSONFromCodeBlock(response); ok {
+        response = block
+    }
 
-	// 直接查找JSON数组 - 找第一个完整的JSON数组
-	arrayStart := strings.Index(response, "[")
-	if arrayStart == -1 {
-		return nil, fmt.Errorf("无法找到JSON数组起始")
-	}
+    // 直接查找JSON数组 - 找第一个完整的JSON数组（允许位于对象内部）
+    arrayStart := strings.Index(response, "[")
+    if arrayStart == -1 {
+        // 回退：尝试解析单个JSON对象（AI可能只输出一个决策对象）
+        // 优先基于包含 "action" 关键字的对象进行提取
+        actionIdx := strings.Index(response, "\"action\"")
+        objStart := -1
+        if actionIdx != -1 {
+            for i := actionIdx; i >= 0; i-- {
+                if response[i] == '{' {
+                    objStart = i
+                    break
+                }
+            }
+        }
+        if objStart == -1 {
+            objStart = strings.Index(response, "{")
+        }
+        if objStart != -1 {
+            objEnd := findMatchingBrace(response, objStart)
+            if objEnd != -1 {
+                objContent := strings.TrimSpace(response[objStart : objEnd+1])
+                objContent = fixMissingQuotes(objContent)
+                objContent = normalizeChinesePunctuation(objContent)
+                objContent = fixTrailingCommas(objContent)
+                objContent = fixRiskUsdExpressions(objContent)
+                var one Decision
+                if err := json.Unmarshal([]byte(objContent), &one); err == nil {
+                    return []Decision{one}, nil
+                }
+            }
+        }
+        return nil, fmt.Errorf("无法找到JSON数组起始")
+    }
 
 	// 从 [ 开始，匹配括号找到对应的 ]
 	arrayEnd := findMatchingBracket(response, arrayStart)
@@ -523,7 +503,9 @@ func extractDecisions(response string) ([]Decision, error) {
 	// 匹配: "reasoning": 内容"}  或  "reasoning": 内容}  (没有引号)
 	// 修复为: "reasoning": "内容"}
 	// 使用简单的字符串扫描而不是正则表达式
-	jsonContent = fixMissingQuotes(jsonContent)
+    jsonContent = fixMissingQuotes(jsonContent)
+    jsonContent = normalizeChinesePunctuation(jsonContent)
+    jsonContent = fixTrailingCommas(jsonContent)
 
 	// 🔧 清理非法 risk_usd 表达式：若出现加减乘除或括号，替换为数字0
 	jsonContent = fixRiskUsdExpressions(jsonContent)
@@ -555,11 +537,57 @@ func extractDecisions(response string) ([]Decision, error) {
 
 // fixMissingQuotes 替换中文引号为英文引号（避免输入法自动转换）
 func fixMissingQuotes(jsonStr string) string {
-	jsonStr = strings.ReplaceAll(jsonStr, "\u201c", "\"") // "
-	jsonStr = strings.ReplaceAll(jsonStr, "\u201d", "\"") // "
-	jsonStr = strings.ReplaceAll(jsonStr, "\u2018", "'")  // '
-	jsonStr = strings.ReplaceAll(jsonStr, "\u2019", "'")  // '
-	return jsonStr
+    jsonStr = strings.ReplaceAll(jsonStr, "\u201c", "\"") // "
+    jsonStr = strings.ReplaceAll(jsonStr, "\u201d", "\"") // "
+    jsonStr = strings.ReplaceAll(jsonStr, "\u2018", "'")  // '
+    jsonStr = strings.ReplaceAll(jsonStr, "\u2019", "'")  // '
+    return jsonStr
+}
+
+// normalizeChinesePunctuation 将常见中文标点替换为英文标点，提升JSON解析兼容性
+func normalizeChinesePunctuation(jsonStr string) string {
+    jsonStr = strings.ReplaceAll(jsonStr, "：", ":")
+    jsonStr = strings.ReplaceAll(jsonStr, "，", ",")
+    return jsonStr
+}
+
+// fixTrailingCommas 移除对象或数组结尾的多余逗号（例如 {"a":1,} 或 [1,2,]）
+func fixTrailingCommas(jsonStr string) string {
+    var b strings.Builder
+    inString := false
+    escaped := false
+    for i := 0; i < len(jsonStr); i++ {
+        c := jsonStr[i]
+        if inString {
+            b.WriteByte(c)
+            if escaped {
+                escaped = false
+            } else {
+                if c == '\\' {
+                    escaped = true
+                } else if c == '"' {
+                    inString = false
+                }
+            }
+            continue
+        }
+        if c == '"' {
+            inString = true
+            b.WriteByte(c)
+            continue
+        }
+        if c == ',' {
+            j := i + 1
+            for j < len(jsonStr) && (jsonStr[j] == ' ' || jsonStr[j] == '\n' || jsonStr[j] == '\t' || jsonStr[j] == '\r') {
+                j++
+            }
+            if j < len(jsonStr) && (jsonStr[j] == '}' || jsonStr[j] == ']') {
+                continue
+            }
+        }
+        b.WriteByte(c)
+    }
+    return b.String()
 }
 
 // fixRiskUsdExpressions 检测并清理 risk_usd 的非法表达式，替换为合法数字（0）
@@ -606,6 +634,43 @@ func fixRiskUsdExpressions(jsonStr string) string {
 		i = valEnd
 	}
 	return jsonStr
+}
+
+// findMatchingBrace 查找匹配的右花括号
+func findMatchingBrace(s string, start int) int {
+    if start >= len(s) || s[start] != '{' {
+        return -1
+    }
+    depth := 0
+    inString := false
+    escaped := false
+    for i := start; i < len(s); i++ {
+        c := s[i]
+        if inString {
+            if escaped {
+                escaped = false
+            } else {
+                if c == '\\' {
+                    escaped = true
+                } else if c == '"' {
+                    inString = false
+                }
+            }
+            continue
+        }
+        switch c {
+        case '"':
+            inString = true
+        case '{':
+            depth++
+        case '}':
+            depth--
+            if depth == 0 {
+                return i
+            }
+        }
+    }
+    return -1
 }
 
 // containsExpressionChars 判断字符串是否包含常见的算术表达式字符
