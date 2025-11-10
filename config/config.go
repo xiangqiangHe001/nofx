@@ -7,6 +7,7 @@ import (
     "os"
     "time"
     "strings"
+    "strconv"
 )
 
 // TraderConfig 鍗曚釜trader鐨勯厤缃?
@@ -121,6 +122,20 @@ func LoadConfig(filename string) (*Config, error) {
     }
     for _, t := range config.Traders {
         log.Printf("[Config] Pre-validate trader '%s' scan_interval_minutes=%d ai_model=%s exchange=%s", t.ID, t.ScanIntervalMinutes, t.AIModel, t.Exchange)
+    }
+
+    // 允许通过环境变量覆盖扫描间隔（用于快速排查“配置未生效”问题）
+    if v := os.Getenv("NOFX_SCAN_INTERVAL_MINUTES"); v != "" {
+        if n, err := strconv.Atoi(v); err == nil && n > 0 {
+            for i := range config.Traders {
+                old := config.Traders[i].ScanIntervalMinutes
+                config.Traders[i].ScanIntervalMinutes = n
+                log.Printf("[Config] Override by env NOFX_SCAN_INTERVAL_MINUTES=%d: trader '%s' %d -> %d",
+                    n, config.Traders[i].ID, old, n)
+            }
+        } else {
+            log.Printf("[Config] Ignore env NOFX_SCAN_INTERVAL_MINUTES='%s' (not a positive integer)", v)
+        }
     }
 
 	// 璁剧疆榛樿鍊硷細濡傛灉use_default_coins鏈缃紙涓篺alse锛変笖娌℃湁閰嶇疆coin_pool_api_url锛屽垯榛樿浣跨敤榛樿甯佺鍒楄〃

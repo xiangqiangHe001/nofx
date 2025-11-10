@@ -1051,13 +1051,176 @@ func (o *OKXTrader) GetMarketPrice(symbol string) (float64, error) {
 }
 
 // SetStopLoss 设置止损
+
 func (o *OKXTrader) SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error {
-    return fmt.Errorf("OKX止损暂未实现")
+    if o.apiKey == "" || o.secretKey == "" || o.passphrase == "" {
+        return fmt.Errorf("OKX API keys are not configured")
+    }
+
+    instID := toOKXInstID(symbol)
+    // 账户与持仓模式
+    posMode := o.getPositionMode()
+    mgnMode := o.getPositionMarginMode(instID, strings.ToLower(positionSide))
+    if mgnMode == "" {
+        mgnMode = "isolated"
+    }
+
+    // 计算下单张数（默认使用当前持仓张数；若传入quantity>0则按规格转换）
+    sz := ""
+    if quantity > 0 {
+        ctVal, lotSz, minSz, exists := o.getInstrumentSpec(instID)
+        if !exists || ctVal <= 0 {
+            ctVal = 1.0
+        }
+        contracts := quantity / ctVal
+        if contracts < 0 { contracts = -contracts }
+        // 按步进与最小单位取整
+        if lotSz > 0 {
+            contracts = math.Floor(contracts/lotSz) * lotSz
+        }
+        if minSz > 0 && contracts < minSz {
+            contracts = minSz
+        }
+        sz = fmt.Sprintf("%f", contracts)
+    } else {
+        contracts, err := o.getPositionContracts(instID, strings.ToLower(positionSide))
+        if err != nil {
+            return fmt.Errorf("获取持仓张数失败: %v", err)
+        }
+        sz = fmt.Sprintf("%f", contracts)
+    }
+
+    // 方向：多仓止损用卖，空仓止损用买
+    side := "sell"
+    if strings.EqualFold(positionSide, "SHORT") || strings.EqualFold(positionSide, "short") {
+        side = "buy"
+    }
+
+    // 触发价与委托价（-1 表示市价触发执行）
+    slTrig := fmt.Sprintf("%f", stopPrice)
+
+    req := map[string]interface{}{
+        "instId":     instID,
+        "tdMode":     mgnMode,
+        "side":       side,
+        "ordType":    "conditional",
+        "sz":         sz,
+        "reduceOnly": true,
+        "slTriggerPx": slTrig,
+        "slOrdPx":     "-1",
+    }
+    if strings.EqualFold(posMode, "long_short_mode") {
+        if strings.EqualFold(positionSide, "LONG") || strings.EqualFold(positionSide, "long") {
+            req["posSide"] = "long"
+        } else {
+            req["posSide"] = "short"
+        }
+    }
+
+    payloadBytes, _ := json.Marshal(req)
+    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order-algo", string(payloadBytes))
+    if err != nil { return err }
+    var resp struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            AlgoID string `json:"algoId"`
+            SCode  string `json:"sCode"`
+            SMsg   string `json:"sMsg"`
+        } `json:"data"`
+    }
+    if err := json.Unmarshal(respBody, &resp); err != nil {
+        return fmt.Errorf("解析止损算法单响应失败: %w", err)
+    }
+    if resp.Code != "0" {
+        detail := ""
+        if len(resp.Data) > 0 && (resp.Data[0].SCode != "" || resp.Data[0].SMsg != "") {
+            detail = fmt.Sprintf(" detail: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+        }
+        return fmt.Errorf("OKX设置止损失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
+    }
+    if len(resp.Data) > 0 && resp.Data[0].SCode != "" && resp.Data[0].SCode != "0" {
+        return fmt.Errorf("OKX设置止损失败: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+    }
+    return nil
 }
 
 // SetTakeProfit 设置止盈
 func (o *OKXTrader) SetTakeProfit(symbol string, positionSide string, quantity, takeProfitPrice float64) error {
-    return fmt.Errorf("OKX止盈暂未实现")
+    if o.apiKey == "" || o.secretKey == "" || o.passphrase == "" {
+        return fmt.Errorf("OKX API keys are not configured")
+    }
+
+    instID := toOKXInstID(symbol)
+    posMode := o.getPositionMode()
+    mgnMode := o.getPositionMarginMode(instID, strings.ToLower(positionSide))
+    if mgnMode == "" { mgnMode = "isolated" }
+
+    sz := ""
+    if quantity > 0 {
+        ctVal, lotSz, minSz, exists := o.getInstrumentSpec(instID)
+        if !exists || ctVal <= 0 { ctVal = 1.0 }
+        contracts := quantity / ctVal
+        if contracts < 0 { contracts = -contracts }
+        if lotSz > 0 { contracts = math.Floor(contracts/lotSz) * lotSz }
+        if minSz > 0 && contracts < minSz { contracts = minSz }
+        sz = fmt.Sprintf("%f", contracts)
+    } else {
+        contracts, err := o.getPositionContracts(instID, strings.ToLower(positionSide))
+        if err != nil { return fmt.Errorf("获取持仓张数失败: %v", err) }
+        sz = fmt.Sprintf("%f", contracts)
+    }
+
+    side := "sell"
+    if strings.EqualFold(positionSide, "SHORT") || strings.EqualFold(positionSide, "short") {
+        side = "buy"
+    }
+
+    tpTrig := fmt.Sprintf("%f", takeProfitPrice)
+    req := map[string]interface{}{
+        "instId":     instID,
+        "tdMode":     mgnMode,
+        "side":       side,
+        "ordType":    "conditional",
+        "sz":         sz,
+        "reduceOnly": true,
+        "tpTriggerPx": tpTrig,
+        "tpOrdPx":     "-1",
+    }
+    if strings.EqualFold(posMode, "long_short_mode") {
+        if strings.EqualFold(positionSide, "LONG") || strings.EqualFold(positionSide, "long") {
+            req["posSide"] = "long"
+        } else {
+            req["posSide"] = "short"
+        }
+    }
+
+    payloadBytes, _ := json.Marshal(req)
+    respBody, err := o.doSignedRequest("POST", "/api/v5/trade/order-algo", string(payloadBytes))
+    if err != nil { return err }
+    var resp struct {
+        Code string `json:"code"`
+        Msg  string `json:"msg"`
+        Data []struct {
+            AlgoID string `json:"algoId"`
+            SCode  string `json:"sCode"`
+            SMsg   string `json:"sMsg"`
+        } `json:"data"`
+    }
+    if err := json.Unmarshal(respBody, &resp); err != nil {
+        return fmt.Errorf("解析止盈算法单响应失败: %w", err)
+    }
+    if resp.Code != "0" {
+        detail := ""
+        if len(resp.Data) > 0 && (resp.Data[0].SCode != "" || resp.Data[0].SMsg != "") {
+            detail = fmt.Sprintf(" detail: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+        }
+        return fmt.Errorf("OKX设置止盈失败: code=%s msg=%s%s", resp.Code, resp.Msg, detail)
+    }
+    if len(resp.Data) > 0 && resp.Data[0].SCode != "" && resp.Data[0].SCode != "0" {
+        return fmt.Errorf("OKX设置止盈失败: sCode=%s sMsg=%s", resp.Data[0].SCode, resp.Data[0].SMsg)
+    }
+    return nil
 }
 
 // CancelAllOrders 取消所有挂单

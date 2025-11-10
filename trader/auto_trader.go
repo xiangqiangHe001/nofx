@@ -190,6 +190,9 @@ type AutoTrader struct {
     lastInvestmentSync    time.Time
     // 扫描间隔配置的生效时间（用于前端展示“scan_interval_minutes 生效时间”）
     scanIntervalAppliedAt time.Time
+    // 轮询降级触发的默认阈值（百分比），若未设置算法单则启用保护
+    fallbackStopLossPct   float64 // 默认 -5% (long: 跌5%止损；short: 涨5%止损)
+    fallbackTakeProfitPct float64 // 默认 +10% (long: 涨10%止盈；short: 跌10%止盈)
 }
 
 // NewAutoTrader 创建自动交易器
@@ -290,6 +293,8 @@ case "binance":
         autoCalibrateBaseline: config.AutoCalibrateInitialBalance,
         calibrationThreshold:  config.CalibrationThreshold,
         scanIntervalAppliedAt: time.Now(),
+        fallbackStopLossPct:   -5.0,
+        fallbackTakeProfitPct: 10.0,
     }
 
     // 初始余额持久化加载（可选）
@@ -358,6 +363,44 @@ func (at *AutoTrader) Run() error {
 func (at *AutoTrader) Stop() {
 	at.isRunning = false
 	log.Println("⏹ 自动交易系统停止")
+}
+
+// enforceFallbackSLTP 轮询降级触发止损/止盈（简单保护：默认 -5% / +10%）
+func (at *AutoTrader) enforceFallbackSLTP(positions []map[string]interface{}) {
+    if !at.executionEnabled { return }
+    for _, pos := range positions {
+        symbol, _ := pos["symbol"].(string)
+        side, _ := pos["side"].(string)
+        entryPrice, _ := pos["entryPrice"].(float64)
+        markPrice, _ := pos["markPrice"].(float64)
+        qty, _ := pos["positionAmt"].(float64)
+        if qty < 0 { qty = -qty }
+        if entryPrice <= 0 || markPrice <= 0 || qty <= 0 { continue }
+
+        // 计算涨跌百分比（相对入场价）
+        changePct := 0.0
+        if side == "long" {
+            changePct = ((markPrice - entryPrice) / entryPrice) * 100
+            // long: 跌到止损或涨到止盈
+            if changePct <= at.fallbackStopLossPct {
+                log.Printf("  🛡️  Fallback SL 触发: %s long Δ=%.2f%%，平仓保护", symbol, changePct)
+                _, _ = at.trader.CloseLong(symbol, 0)
+            } else if changePct >= at.fallbackTakeProfitPct {
+                log.Printf("  🛡️  Fallback TP 触发: %s long Δ=%.2f%%，平仓止盈", symbol, changePct)
+                _, _ = at.trader.CloseLong(symbol, 0)
+            }
+        } else {
+            changePct = ((entryPrice - markPrice) / entryPrice) * 100
+            // short: 涨到止损或跌到止盈
+            if changePct <= at.fallbackStopLossPct {
+                log.Printf("  🛡️  Fallback SL 触发: %s short Δ=%.2f%%，平仓保护", symbol, changePct)
+                _, _ = at.trader.CloseShort(symbol, 0)
+            } else if changePct >= at.fallbackTakeProfitPct {
+                log.Printf("  🛡️  Fallback TP 触发: %s short Δ=%.2f%%，平仓止盈", symbol, changePct)
+                _, _ = at.trader.CloseShort(symbol, 0)
+            }
+        }
+    }
 }
 
 // investedBaseline 返回用于计算总盈亏的真实投入基线（初始余额 + 额外投入）
@@ -616,11 +659,11 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	// 当前持仓的key集合（用于清理已平仓的记录）
 	currentPositionKeys := make(map[string]bool)
 
-	for _, pos := range positions {
-		symbol := pos["symbol"].(string)
-		side := pos["side"].(string)
-		entryPrice := pos["entryPrice"].(float64)
-		markPrice := pos["markPrice"].(float64)
+    for _, pos := range positions {
+        symbol := pos["symbol"].(string)
+        side := pos["side"].(string)
+        entryPrice := pos["entryPrice"].(float64)
+        markPrice := pos["markPrice"].(float64)
 		quantity := pos["positionAmt"].(float64)
 		if quantity < 0 {
 			quantity = -quantity // 空仓数量为负，转为正数
@@ -653,20 +696,23 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		}
 		updateTime := at.positionFirstSeenTime[posKey]
 
-		positionInfos = append(positionInfos, decision.PositionInfo{
-			Symbol:           symbol,
-			Side:             side,
-			EntryPrice:       entryPrice,
-			MarkPrice:        markPrice,
-			Quantity:         quantity,
-			Leverage:         leverage,
-			UnrealizedPnL:    unrealizedPnl,
-			UnrealizedPnLPct: pnlPct,
-			LiquidationPrice: liquidationPrice,
-			MarginUsed:       marginUsed,
-			UpdateTime:       updateTime,
-		})
-	}
+        positionInfos = append(positionInfos, decision.PositionInfo{
+            Symbol:           symbol,
+            Side:             side,
+            EntryPrice:       entryPrice,
+            MarkPrice:        markPrice,
+            Quantity:         quantity,
+            Leverage:         leverage,
+            UnrealizedPnL:    unrealizedPnl,
+            UnrealizedPnLPct: pnlPct,
+            LiquidationPrice: liquidationPrice,
+            MarginUsed:       marginUsed,
+            UpdateTime:       updateTime,
+        })
+    }
+
+    // 降级轮询触发止损/止盈：若算法单未能设置或被撤销，轮询检测价格触发后直接平仓
+    at.enforceFallbackSLTP(positions)
 
 	// 清理已平仓的持仓记录
 	for key := range at.positionFirstSeenTime {
@@ -1682,7 +1728,7 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 		})
 	}
 
-	return result, nil
+return result, nil
 }
 
 // sortDecisionsByPriority 对决策排序：先平仓，再开仓，最后hold/wait
