@@ -2,75 +2,120 @@ param(
     [Parameter(Mandatory=$true)] [string]$RepoUrl,
     [string]$Branch = "main",
     [string]$CommitMessage = "chore: whitelist coins & upload (auto)",
-    [switch]$Force
+    [switch]$Force,
+    [string]$Proxy,
+    [switch]$EnableProxy,
+    [switch]$GlobalProxy,
+    [switch]$ProxyClear
 )
 
 Write-Host "Starting upload to repo: $RepoUrl (branch: $Branch)" -ForegroundColor Cyan
 
-# 项目根目录（脚本位于 scripts/ 下）
+# Project root (script is under scripts/)
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $ProjectRoot
 
-function Exec($cmd) {
-    Write-Host "=> $cmd" -ForegroundColor DarkGray
-    $output = Invoke-Expression $cmd
-    return $output
+# Proxy config and rollback
+$prevHttpProxy = ''
+$prevHttpsProxy = ''
+$proxyWasApplied = $false
+
+# Scope (local/global)
+$scopeArgs = @()
+$scopeName = 'local'
+if ($GlobalProxy) { $scopeArgs += '--global'; $scopeName = 'global' }
+
+# Pre-read global and local proxy, then choose by scope
+$globalHttpGet = & git config --global --get http.proxy
+if ($LASTEXITCODE -eq 0 -and $globalHttpGet) { $prevGlobalHttp = $globalHttpGet }
+$globalHttpsGet = & git config --global --get https.proxy
+if ($LASTEXITCODE -eq 0 -and $globalHttpsGet) { $prevGlobalHttps = $globalHttpsGet }
+
+$localHttpGet = & git config --get http.proxy
+if ($LASTEXITCODE -eq 0 -and $localHttpGet) { $prevLocalHttp = $localHttpGet }
+$localHttpsGet = & git config --get https.proxy
+if ($LASTEXITCODE -eq 0 -and $localHttpsGet) { $prevLocalHttps = $localHttpsGet }
+
+$prevHttpProxy = $prevLocalHttp
+if ($GlobalProxy -and $prevGlobalHttp) { $prevHttpProxy = $prevGlobalHttp }
+$prevHttpsProxy = $prevLocalHttps
+if ($GlobalProxy -and $prevGlobalHttps) { $prevHttpsProxy = $prevGlobalHttps }
+
+if ($EnableProxy -and $Proxy) {
+    Write-Host "Apply git proxy ($scopeName): $Proxy" -ForegroundColor Yellow
+    & git config @scopeArgs http.proxy $Proxy
+    & git config @scopeArgs https.proxy $Proxy
+    $proxyWasApplied = $true
 }
 
-# 检查 git 可用
-$gitVer = Exec 'git --version'
+# Clear proxy and exit (safe path)
+if ($ProxyClear) {
+    Write-Host "Clearing git proxy ($scopeName)" -ForegroundColor Yellow
+    & git config @scopeArgs --unset http.proxy
+    & git config @scopeArgs --unset https.proxy
+    Write-Host "Proxy cleared ($scopeName)" -ForegroundColor Green
+    exit 0
+}
+
+# Check git availability
+& git --version | Out-Null
 if (-not $?) {
     Write-Error "git not found or not working. Please install and configure git."
     exit 1
 }
 
-# 初始化或确认仓库
+# Init or confirm repository
 if (-not (Test-Path (Join-Path $ProjectRoot '.git'))) {
     Write-Host "Initialize git repository" -ForegroundColor Yellow
-    Exec 'git init'
+    & git init | Out-Null
 }
 
-# 设置本地用户名/邮箱（避免提交失败）
-$userName = Exec 'git config user.name'
-if (-not $userName) { Exec 'git config user.name "auto-upload"' }
-$userEmail = Exec 'git config user.email'
-if (-not $userEmail) { Exec 'git config user.email "auto@local"' }
+# Set local username/email to avoid commit failures
+$userName = & git config user.name
+if (-not $userName) { & git config user.name "auto-upload" }
+$userEmail = & git config user.email
+if (-not $userEmail) { & git config user.email "auto@local" }
 
-# 设置远程 origin
+# Configure remote origin
+$remotes = & git remote
 $hasOrigin = $false
-$remoteUrl = Exec 'git remote get-url origin 2>$null'
-if ($?) { $hasOrigin = $true } else { $hasOrigin = $false }
-
+if ($remotes) { $hasOrigin = ($remotes -contains 'origin') }
+if ($hasOrigin) {
+    Write-Host "Update remote origin: $RepoUrl" -ForegroundColor Yellow
+    & git remote set-url origin $RepoUrl
+}
 if (-not $hasOrigin) {
     Write-Host "Add remote origin: $RepoUrl" -ForegroundColor Yellow
-    Exec ('git remote add origin "' + $RepoUrl + '"')
-} else {
-    Write-Host "Update remote origin: $RepoUrl" -ForegroundColor Yellow
-    Exec ('git remote set-url origin "' + $RepoUrl + '"')
+    & git remote add origin $RepoUrl
 }
 
-# 切换或创建分支
-$checkout = Exec "git checkout -B $Branch"
+# Switch or create branch
+& git checkout -B $Branch
 if (-not $?) {
     Write-Error "Failed to switch branch: $Branch"
     exit 1
 }
 
-# 暂存并提交
-$status = Exec 'git status --porcelain'
+# Stage and commit
+$status = & git status --porcelain
+if ($status) {
+    & git add -A
+    & git commit -m $CommitMessage
+}
 if (-not $status) {
     Write-Host "No changes to commit, pushing directly" -ForegroundColor Green
-} else {
-    Exec 'git add -A'
-    Exec ('git commit -m "' + $CommitMessage + '"')
 }
 
-# 推送
-if ($Force) {
-    Exec "git push -u origin $Branch --force-with-lease"
-}
-if (-not $Force) {
-    Exec "git push -u origin $Branch"
+# Push
+$pushArgs = @('push','-u','origin',$Branch)
+if ($Force) { $pushArgs += '--force-with-lease' }
+& git @pushArgs
+
+# Restore proxy (safe)
+if ($proxyWasApplied) {
+    if ($prevHttpProxy) { & git config @scopeArgs http.proxy $prevHttpProxy } else { & git config @scopeArgs --unset http.proxy }
+    if ($prevHttpsProxy) { & git config @scopeArgs https.proxy $prevHttpsProxy } else { & git config @scopeArgs --unset https.proxy }
+    Write-Host "Proxy settings restored ($scopeName)" -ForegroundColor Yellow
 }
 
 Write-Host "Upload complete: $RepoUrl ($Branch)" -ForegroundColor Green
