@@ -16,10 +16,35 @@ try {
     cmd /c chcp 65001 > $null 2>&1
 } catch {}
 
-# 若未提供 ConfigPath，默认使用项目根下 trade\config.json
+# 若未提供 ConfigPath，自动选择最新配置路径：优先 trade\config.json，其次根目录 config.json
 if (-not $ConfigPath -or $ConfigPath.Trim() -eq '') {
-    $ConfigPath = Join-Path $PSScriptRoot 'trade\config.json'
+    $preferred = Join-Path $PSScriptRoot 'trade\config.json'
+    $fallback  = Join-Path $PSScriptRoot 'config.json'
+    if (Test-Path -LiteralPath $preferred) {
+        $ConfigPath = $preferred
+        Write-Host "Using config: $ConfigPath" -ForegroundColor Yellow
+    } elseif (Test-Path -LiteralPath $fallback) {
+        $ConfigPath = $fallback
+        Write-Host "Using config (fallback): $ConfigPath" -ForegroundColor Yellow
+    } else {
+        Write-Host "Config file not found: trade\\config.json nor config.json under $PSScriptRoot" -ForegroundColor Red
+        throw "Missing config.json; please place your latest trade/config.json or root config.json"
+    }
 }
+
+# 固定提示词变体与绝对路径校验（确保始终使用 D:\TRAE\projerct\prompt\system_zhugefan.txt 与 user_zhugefan.txt）
+$PromptSystemPath = Join-Path $PSScriptRoot 'prompt\system_zhugefan.txt'
+$PromptUserPath   = Join-Path $PSScriptRoot 'prompt\user_zhugefan.txt'
+if (-not (Test-Path -LiteralPath $PromptSystemPath)) {
+    Write-Host "Prompt system file missing: $PromptSystemPath" -ForegroundColor Red
+    throw "Missing prompt system_zhugefan.txt"
+}
+if (-not (Test-Path -LiteralPath $PromptUserPath)) {
+    Write-Host "Prompt user file missing: $PromptUserPath" -ForegroundColor Red
+    throw "Missing prompt user_zhugefan.txt"
+}
+Write-Host "Using prompt system: $PromptSystemPath" -ForegroundColor Yellow
+Write-Host "Using prompt user:   $PromptUserPath" -ForegroundColor Yellow
 
 $webDir = Join-Path $PSScriptRoot 'web'
 

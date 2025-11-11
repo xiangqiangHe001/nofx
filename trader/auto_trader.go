@@ -155,6 +155,8 @@ type AutoTraderConfig struct {
 	MaxDrawdown     float64       // 最大回撤百分比（提示）
     StopTradingTime time.Duration // 触发风控后暂停时长
     DryRun          bool          // 是否 DryRun（演示模式，跳过真实下单）
+    // 决策校验阈值
+    MinRiskRewardRatio float64 // 最小风险回报比（硬性校验）
 }
 
 // AutoTrader 自动交易器
@@ -337,6 +339,7 @@ func (at *AutoTrader) Run() error {
     log.Println("🚀 AI驱动自动交易系统启动")
     log.Printf("💰 初始余额: %.2f USDT | 额外投入: %.2f USDT | 总投入: %.2f USDT", at.initialBalance, at.config.ExtraInvestment, at.initialBalance+at.config.ExtraInvestment)
     log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
+    log.Printf("🛡️  最小风险回报比: %.2f", at.config.MinRiskRewardRatio)
     log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
 
     ticker := time.NewTicker(at.config.ScanInterval)
@@ -493,7 +496,7 @@ func (at *AutoTrader) runCycle() error {
     if strings.TrimSpace(variant) == "" {
         variant = prompt.DefaultVariant
     }
-    fallbackSystemPrompt := prompt.RenderSystemPrompt(variant, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+    fallbackSystemPrompt := prompt.RenderSystemPrompt(variant, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, at.config.MinRiskRewardRatio)
 
     log.Printf("Account equity: %.2f USDT | Available: %.2f USDT | Positions: %d",
         ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
@@ -767,7 +770,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	}
 
 	// 6. 构建上下文
-	ctx := &decision.Context{
+ctx := &decision.Context{
 		CurrentTime:      time.Now().Format("2006-01-02 15:04:05"),
 		RuntimeMinutes:   int(time.Since(at.startTime).Minutes()),
 		CallCount:        at.callCount,
@@ -784,8 +787,9 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		},
 		Positions:      positionInfos,
 		CandidateCoins: candidateCoins,
-		Performance:    performance, // 添加历史表现分析
-	}
+        Performance:    performance, // 添加历史表现分析
+        MinRiskRewardRatio: at.config.MinRiskRewardRatio,
+}
 
 	return ctx, nil
 }

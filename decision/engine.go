@@ -67,7 +67,8 @@ type Context struct {
 	OITopDataMap    map[string]*OITopData   `json:"-"` // OI Top数据映射
 	Performance     interface{}             `json:"-"` // 历史表现分析（logger.PerformanceAnalysis）
 	BTCETHLeverage  int                     `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
-	AltcoinLeverage int                     `json:"-"` // 山寨币杠杆倍数（从配置读取）
+    AltcoinLeverage int                     `json:"-"` // 山寨币杠杆倍数（从配置读取）
+    MinRiskRewardRatio float64              `json:"-"` // 最小风险回报比（从配置读取）
 }
 
 // Decision AI的交易决策
@@ -104,7 +105,7 @@ func GetFullDecision(ctx *Context) (*FullDecision, error) {
     log.Printf("[Prompt] Active variant: %s", activePromptVariant())
 
     // 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
-    systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+    systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, ctx.MinRiskRewardRatio)
     userPrompt := buildUserPrompt(ctx)
 
 	// 3. 调用AI API（使用 system + user prompt）
@@ -113,8 +114,8 @@ func GetFullDecision(ctx *Context) (*FullDecision, error) {
 		return nil, fmt.Errorf("failed to call AI API: %w", err)
 	}
 
-	// 4. 解析AI响应
-	decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+    // 4. 解析AI响应
+    decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, ctx.MinRiskRewardRatio)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse AI response: %w", err)
 	}
@@ -136,7 +137,7 @@ func GetFullDecisionWithClient(client *mcp.Client, ctx *Context) (*FullDecision,
     log.Printf("[Prompt] Active variant: %s", activePromptVariant())
 
     // 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
-    systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+    systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, ctx.MinRiskRewardRatio)
     userPrompt := buildUserPrompt(ctx)
 
 	// 3. 调用AI API（使用 system + user prompt）——使用传入client避免defaultClient被其他trader覆盖
@@ -146,7 +147,7 @@ func GetFullDecisionWithClient(client *mcp.Client, ctx *Context) (*FullDecision,
 	}
 
 	// 4. 解析AI响应
-	decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage)
+    decision, err := parseFullDecisionResponse(aiResponse, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, ctx.MinRiskRewardRatio)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse AI response: %w", err)
 	}
@@ -240,8 +241,8 @@ func calculateMaxCandidates(ctx *Context) int {
 }
 
 // buildSystemPrompt 构建 System Prompt（固定规则，可缓存）
-func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage int) string {
-    return prompt.RenderSystemPrompt(activePromptVariant(), accountEquity, btcEthLeverage, altcoinLeverage)
+func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage int, minRR float64) string {
+    return prompt.RenderSystemPrompt(activePromptVariant(), accountEquity, btcEthLeverage, altcoinLeverage, minRR)
 }
 
 // buildUserPrompt 构建 User Prompt（动态数据）
@@ -368,7 +369,7 @@ func activePromptVariant() string {
 }
 
 // parseFullDecisionResponse 解析AI的完整决策响应
-func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthLeverage, altcoinLeverage int) (*FullDecision, error) {
+func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthLeverage, altcoinLeverage int, minRiskRewardRatio float64) (*FullDecision, error) {
 	// 1. 提取思维链
 	cotTrace := extractCoTTrace(aiResponse)
 
@@ -382,7 +383,7 @@ func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthL
 	}
 
 	// 3. 验证决策
-	if err := validateDecisions(decisions, accountEquity, btcEthLeverage, altcoinLeverage); err != nil {
+    if err := validateDecisions(decisions, accountEquity, btcEthLeverage, altcoinLeverage, minRiskRewardRatio); err != nil {
 		return &FullDecision{
 			CoTTrace:  cotTrace,
 			Decisions: decisions,
@@ -397,8 +398,8 @@ func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthL
 
 // ParseDecisionsForTest 对外暴露的解析函数，仅用于本地解析测试小工具
 // 目的：允许在不调用外部API的情况下，直接验证AI响应字符串的解析与校验逻辑
-func ParseDecisionsForTest(aiResponse string, accountEquity float64, btcEthLeverage, altcoinLeverage int) (*FullDecision, error) {
-	return parseFullDecisionResponse(aiResponse, accountEquity, btcEthLeverage, altcoinLeverage)
+func ParseDecisionsForTest(aiResponse string, accountEquity float64, btcEthLeverage, altcoinLeverage int, minRiskRewardRatio float64) (*FullDecision, error) {
+    return parseFullDecisionResponse(aiResponse, accountEquity, btcEthLeverage, altcoinLeverage, minRiskRewardRatio)
 }
 
 // extractCoTTrace 提取思维链分析
@@ -728,13 +729,13 @@ func inferSymbolFromText(s string) string {
 }
 
 // validateDecisions 验证所有决策（需要账户信息和杠杆配置）
-func validateDecisions(decisions []Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int) error {
-	for i, decision := range decisions {
-		if err := validateDecision(&decision, accountEquity, btcEthLeverage, altcoinLeverage); err != nil {
-			return fmt.Errorf("决策 #%d 验证失败: %w", i+1, err)
-		}
-	}
-	return nil
+func validateDecisions(decisions []Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int, minRiskRewardRatio float64) error {
+    for i, decision := range decisions {
+        if err := validateDecision(&decision, accountEquity, btcEthLeverage, altcoinLeverage, minRiskRewardRatio); err != nil {
+            return fmt.Errorf("决策 #%d 验证失败: %w", i+1, err)
+        }
+    }
+    return nil
 }
 
 // findMatchingBracket 查找匹配的右括号
@@ -781,7 +782,7 @@ func findMatchingBracket(s string, start int) int {
 }
 
 // validateDecision 验证单个决策的有效性
-func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int) error {
+func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoinLeverage int, minRiskRewardRatio float64) error {
 	// 验证action
 	validActions := map[string]bool{
 		"open_long":   true,
@@ -861,11 +862,11 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		}
 
 		// 硬约束：风险回报比必须≥2.6
-		if riskRewardRatio < 2.6 {
-			return fmt.Errorf("风险回报比过低(%.2f:1)，必须≥2.6:1 [风险:%.2f%% 收益:%.2f%%] [入场:%.2f 止损:%.2f 止盈:%.2f]",
-				riskRewardRatio, riskPercent, rewardPercent, entryPrice, d.StopLoss, d.TakeProfit)
-		}
-	}
+        if riskRewardRatio < minRiskRewardRatio {
+            return fmt.Errorf("风险回报比过低(%.2f:1)，必须≥%.2f:1 [风险:%.2f%% 收益:%.2f%%] [入场:%.2f 止损:%.2f 止盈:%.2f]",
+                riskRewardRatio, minRiskRewardRatio, riskPercent, rewardPercent, entryPrice, d.StopLoss, d.TakeProfit)
+        }
+    }
 
-	return nil
+    return nil
 }

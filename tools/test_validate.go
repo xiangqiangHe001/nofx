@@ -2,6 +2,7 @@ package main
 
 import (
     "fmt"
+    "os"
     "nofx/decision"
     "nofx/market"
 )
@@ -41,7 +42,12 @@ func main() {
 
     // 4) 解析并校验（使用账户净值与杠杆上限）
     // 账户净值与杠杆上限只影响其他校验，此处设为常用默认
-    fd, err := decision.ParseDecisionsForTest(aiResponse, 1000.0, 5, 5)
+    // 使用环境变量或默认值传入最小风险回报比
+    minRR := 2.6
+    if v := os.Getenv("NOFX_MIN_RISK_REWARD_RATIO"); v != "" {
+        fmt.Sscanf(v, "%f", &minRR)
+    }
+    fd, err := decision.ParseDecisionsForTest(aiResponse, 1000.0, 5, 5, minRR)
     if err != nil {
         fmt.Println("=== 校验返回（预期触发RR<2.6） ===")
         fmt.Println(err.Error())

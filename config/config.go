@@ -7,7 +7,6 @@ import (
     "os"
     "time"
     "strings"
-    "strconv"
 )
 
 // TraderConfig 鍗曚釜trader鐨勯厤缃?
@@ -78,6 +77,8 @@ type Config struct {
     MaxDailyLoss       float64        `json:"max_daily_loss"`
     MaxDrawdown        float64        `json:"max_drawdown"`
     StopTradingMinutes int            `json:"stop_trading_minutes"`
+    // 最小风险回报比（硬性校验阈值），默认2.6；可通过环境变量 NOFX_MIN_RISK_REWARD_RATIO 回退设置（当未在配置文件中指定时）
+    MinRiskRewardRatio float64        `json:"min_risk_reward_ratio"`
     Leverage           LeverageConfig `json:"leverage"` // 鏉犳潌閰嶇疆
     // 外部仓库兼容适配总开关与模块级开关（默认全部关闭，保证现有行为不变）
     ExternalCompat     ExternalCompatConfig `json:"external_compat"`
@@ -124,18 +125,18 @@ func LoadConfig(filename string) (*Config, error) {
         log.Printf("[Config] Pre-validate trader '%s' scan_interval_minutes=%d ai_model=%s exchange=%s", t.ID, t.ScanIntervalMinutes, t.AIModel, t.Exchange)
     }
 
-    // 允许通过环境变量覆盖扫描间隔（用于快速排查“配置未生效”问题）
-    if v := os.Getenv("NOFX_SCAN_INTERVAL_MINUTES"); v != "" {
-        if n, err := strconv.Atoi(v); err == nil && n > 0 {
-            for i := range config.Traders {
-                old := config.Traders[i].ScanIntervalMinutes
-                config.Traders[i].ScanIntervalMinutes = n
-                log.Printf("[Config] Override by env NOFX_SCAN_INTERVAL_MINUTES=%d: trader '%s' %d -> %d",
-                    n, config.Traders[i].ID, old, n)
+    // 设置最小风险回报比默认值；优先使用配置文件，若未设置则尝试使用环境变量作为回退
+    if config.MinRiskRewardRatio <= 0 {
+        if v := os.Getenv("NOFX_MIN_RISK_REWARD_RATIO"); v != "" {
+            // 简单解析为浮点数
+            if rr, err := parseFloatSafe(v); err == nil && rr > 0 {
+                config.MinRiskRewardRatio = rr
+                log.Printf("[Config] Set min_risk_reward_ratio from env NOFX_MIN_RISK_REWARD_RATIO=%.2f", rr)
             }
-        } else {
-            log.Printf("[Config] Ignore env NOFX_SCAN_INTERVAL_MINUTES='%s' (not a positive integer)", v)
         }
+    }
+    if config.MinRiskRewardRatio <= 0 {
+        config.MinRiskRewardRatio = 2.6
     }
 
 	// 璁剧疆榛樿鍊硷細濡傛灉use_default_coins鏈缃紙涓篺alse锛変笖娌℃湁閰嶇疆coin_pool_api_url锛屽垯榛樿浣跨敤榛樿甯佺鍒楄〃
@@ -259,7 +260,20 @@ func (c *Config) Validate() error {
 }
 
 func (tc *TraderConfig) GetScanInterval() time.Duration {
-	return time.Duration(tc.ScanIntervalMinutes) * time.Minute
+    return time.Duration(tc.ScanIntervalMinutes) * time.Minute
+}
+
+// parseFloatSafe 尝试解析字符串为 float64（支持简单格式），失败返回错误
+func parseFloatSafe(s string) (float64, error) {
+    // 避免引入额外库，这里使用 fmt 和字符串清理
+    // 移除可能的百分号或空格
+    cleaned := strings.TrimSpace(strings.TrimSuffix(s, "%"))
+    var f float64
+    _, err := fmt.Sscanf(cleaned, "%f", &f)
+    if err != nil {
+        return 0, err
+    }
+    return f, nil
 }
 
 

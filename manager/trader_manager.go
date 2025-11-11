@@ -23,7 +23,7 @@ func NewTraderManager() *TraderManager {
 }
 
 // AddTrader 娣诲姞涓€涓猼rader
-func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig) error {
+func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, minRiskRewardRatio float64) error {
     tm.mu.Lock()
     defer tm.mu.Unlock()
 
@@ -32,7 +32,7 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
     }
 
 	// 鏋勫缓AutoTraderConfig
-	traderConfig := trader.AutoTraderConfig{
+    traderConfig := trader.AutoTraderConfig{
 		ID:                    cfg.ID,
 		Name:                  cfg.Name,
 		AIModel:               cfg.AIModel,
@@ -66,8 +66,9 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		AltcoinLeverage:       leverage.AltcoinLeverage, // 浣跨敤閰嶇疆鐨勬潬鏉嗗€嶆暟
 		MaxDailyLoss:          maxDailyLoss,
 		MaxDrawdown:           maxDrawdown,
-		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
-	}
+        StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
+        MinRiskRewardRatio:    minRiskRewardRatio,
+    }
 
     // Debug: 打印当前 trader 的扫描间隔配置与换算后的值
     log.Printf("[Manager] AddTrader '%s' (%s): scan_interval_minutes=%d -> interval=%s", cfg.ID, cfg.Name, cfg.ScanIntervalMinutes, cfg.GetScanInterval())

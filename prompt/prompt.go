@@ -9,9 +9,9 @@ import (
 )
 
 const (
-	DefaultVariant = "zhugefan"
-	systemPrefix   = "prompt/system_"
-	userPrefix     = "prompt/user_"
+    DefaultVariant = "zhugefan"
+    systemPrefix   = "prompt/system_"
+    userPrefix     = "prompt/user_"
 )
 
 // RenderSystemPrompt 加载指定变体的系统提示词，并填充必要的动态占位符
@@ -19,21 +19,23 @@ const (
 // - {{POSITION_LIMITS}} 由账户净值与杠杆计算出的仓位限制行
 // - {{LEVERAGE_BTC_ETH}} 用于示例 JSON 中 BTC/ETH 的杠杆数字
 // - {{POSITION_SIZE_BTC_SAMPLE}} 用于示例 JSON 中 BTC 头寸大小示例
-func RenderSystemPrompt(variant string, accountEquity float64, btcEthLeverage, altcoinLeverage int) string {
-	content := readFileSafe(systemFile(variant))
-	if content == "" {
-		content = defaultSystemStub()
-	}
+func RenderSystemPrompt(variant string, accountEquity float64, btcEthLeverage, altcoinLeverage int, minRiskReward float64) string {
+    content := readFileSafe(systemFile(variant))
+    if content == "" {
+        content = defaultSystemStub(minRiskReward)
+    }
 
-	// 计算动态占位符
-	positionLimits := fmt.Sprintf("3. **单币仓位**: 山寨%.0f-%.0f U(%dx杠杆) | BTC/ETH %.0f-%.0f U(%dx杠杆)",
-		accountEquity*0.8, accountEquity*1.5, altcoinLeverage, accountEquity*5, accountEquity*10, btcEthLeverage)
+    // 计算动态占位符
+    positionLimits := fmt.Sprintf("3. **单币仓位**: 山寨%.0f-%.0f U(%dx杠杆) | BTC/ETH %.0f-%.0f U(%dx杠杆)",
+        accountEquity*0.8, accountEquity*1.5, altcoinLeverage, accountEquity*5, accountEquity*10, btcEthLeverage)
 
-	content = strings.ReplaceAll(content, "{{POSITION_LIMITS}}", positionLimits)
-	content = strings.ReplaceAll(content, "{{LEVERAGE_BTC_ETH}}", strconv.Itoa(btcEthLeverage))
-	content = strings.ReplaceAll(content, "{{POSITION_SIZE_BTC_SAMPLE}}", fmt.Sprintf("%.0f", accountEquity*5))
+    content = strings.ReplaceAll(content, "{{POSITION_LIMITS}}", positionLimits)
+    content = strings.ReplaceAll(content, "{{LEVERAGE_BTC_ETH}}", strconv.Itoa(btcEthLeverage))
+    content = strings.ReplaceAll(content, "{{POSITION_SIZE_BTC_SAMPLE}}", fmt.Sprintf("%.0f", accountEquity*5))
+    // 支持动态最小风险回报比占位
+    content = strings.ReplaceAll(content, "{{MIN_RISK_REWARD}}", fmt.Sprintf("%.2f", minRiskReward))
 
-	return content
+    return content
 }
 
 // UserPromptFooter 加载用户提示词尾部文案（例如下达输出格式的指令）
@@ -68,12 +70,12 @@ func readFileSafe(path string) string {
 }
 
 // 当找不到变体文件时的最小系统提示词占位
-func defaultSystemStub() string {
-	return "你是专业的加密货币交易AI，目标是最大化夏普比率。\n" +
-		"# ⚖️ 硬约束（风险控制）\n" +
-		"1. 风险回报比 ≥ 1:2.6\n2. 最多持仓 3 个币种\n" +
-		"{{POSITION_LIMITS}}\n4. 保证金总使用率 ≤ 90%\n\n" +
-		"# 📤 输出格式\n先给出你的思维链分析，再输出 JSON 决策数组。\n"
+func defaultSystemStub(minRiskReward float64) string {
+    return fmt.Sprintf("你是专业的加密货币交易AI，目标是最大化夏普比率。\n"+
+        "# ⚖️ 硬约束（风险控制）\n"+
+        "1. 风险回报比 ≥ 1:%.2f\n2. 最多持仓 3 个币种\n"+
+        "{{POSITION_LIMITS}}\n4. 保证金总使用率 ≤ 90%\n\n"+
+        "# 📤 输出格式\n先给出你的思维链分析，再输出 JSON 决策数组。\n", minRiskReward)
 }
 
 func defaultUserFooter() string {

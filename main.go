@@ -70,14 +70,15 @@ func main() {
 		log.Printf("📦 [%d/%d] 初始化 %s (%s模型)...",
 			i+1, len(cfg.Traders), traderCfg.Name, strings.ToUpper(traderCfg.AIModel))
 
-		err := traderManager.AddTrader(
-			traderCfg,
-			cfg.CoinPoolAPIURL,
-			cfg.MaxDailyLoss,
-			cfg.MaxDrawdown,
-			cfg.StopTradingMinutes,
-			cfg.Leverage, // 传递杠杆配置
-		)
+        err := traderManager.AddTrader(
+            traderCfg,
+            cfg.CoinPoolAPIURL,
+            cfg.MaxDailyLoss,
+            cfg.MaxDrawdown,
+            cfg.StopTradingMinutes,
+            cfg.Leverage, // 传递杠杆配置
+            cfg.MinRiskRewardRatio, // 传递最小风险回报比
+        )
 		if err != nil {
 			log.Fatalf("❌ 初始化trader失败: %v", err)
 		}
