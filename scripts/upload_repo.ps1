@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true)] [string]$RepoUrl,
+    [string]$RepoUrl,
     [string]$Branch = "main",
     [string]$CommitMessage = "chore: whitelist coins & upload (auto)",
     [switch]$Force,
@@ -10,12 +10,39 @@ param(
     [switch]$ProxyClear
 )
 
-Write-Host "Starting upload to repo: $RepoUrl (branch: $Branch)" -ForegroundColor Cyan
+# Console encoding init (for click-to-run robustness)
+try {
+    [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+    $OutputEncoding = [Console]::OutputEncoding
+    cmd /c chcp 65001 > $null 2>&1
+} catch {}
 
 # Project root (script is under scripts/)
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $ProjectRoot
 Write-Verbose "Project root: $ProjectRoot"
+
+# Derive RepoUrl for click-to-run if not provided (skip when only clearing proxy)
+if (-not $RepoUrl -and -not $ProxyClear) {
+    $originUrl = ''
+    try { $originUrl = & git remote get-url origin 2>$null } catch {}
+    if ($originUrl) {
+        $RepoUrl = $originUrl
+        Write-Host "Using existing remote origin as RepoUrl: $RepoUrl" -ForegroundColor Yellow
+    } elseif ($env:NOFX_REPO_URL) {
+        $RepoUrl = $env:NOFX_REPO_URL
+        Write-Host "Using env NOFX_REPO_URL as RepoUrl: $RepoUrl" -ForegroundColor Yellow
+    } else {
+        Write-Host "RepoUrl not provided and no origin/env found." -ForegroundColor Red
+        $RepoUrl = Read-Host "Enter Repo URL (e.g., https://github.com/user/repo.git)"
+        if (-not $RepoUrl -or $RepoUrl.Trim() -eq '') {
+            Write-Error "RepoUrl is required to push. Aborting."
+            exit 1
+        }
+    }
+}
+
+Write-Host "Starting upload to repo: $RepoUrl (branch: $Branch)" -ForegroundColor Cyan
 
 # Proxy config and rollback
 $prevHttpProxy = ''
