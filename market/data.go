@@ -145,14 +145,32 @@ func Get(symbol string) (*Data, error) {
 
 // getKlines 优先从Binance获取K线；失败时回退到OKX
 func getKlines(symbol, interval string, limit int) ([]Kline, error) {
-    // 1) 先尝试 Binance
-    binanceURL := fmt.Sprintf("https://fapi.binance.com/fapi/v1/klines?symbol=%s&interval=%s&limit=%d", symbol, interval, limit)
-    if kl, err := fetchBinanceKlines(binanceURL); err == nil && len(kl) > 0 {
-        return kl, nil
+    var lastErr error
+    // 总共尝试 3 次：每次先试 Binance，失败则回退 OKX
+    for attempt := 1; attempt <= 3; attempt++ {
+        // 1) 先尝试 Binance
+        binanceURL := fmt.Sprintf("https://fapi.binance.com/fapi/v1/klines?symbol=%s&interval=%s&limit=%d", symbol, interval, limit)
+        if kl, err := fetchBinanceKlines(binanceURL); err == nil && len(kl) > 0 {
+            return kl, nil
+        } else if err != nil {
+            lastErr = err
+        }
+
+        // 2) 回退到 OKX（将 symbol 转为 instId，并转换 interval）
+        if kl, err := fetchOKXKlines(symbol, interval, limit); err == nil && len(kl) > 0 {
+            return kl, nil
+        } else if err != nil {
+            lastErr = err
+        }
+
+        // 简单退避：500ms, 1000ms, 1500ms
+        time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
     }
 
-    // 2) 回退到 OKX（将 symbol 转为 instId，并转换 interval）
-    return fetchOKXKlines(symbol, interval, limit)
+    if lastErr != nil {
+        return nil, lastErr
+    }
+    return nil, fmt.Errorf("failed to fetch klines after 3 attempts")
 }
 
 // fetchBinanceKlines 获取 Binance K线
@@ -200,6 +218,9 @@ func fetchBinanceKlines(url string) ([]Kline, error) {
 // fetchOKXKlines 获取 OKX K线（公开行情）
 func fetchOKXKlines(symbol, interval string, limit int) ([]Kline, error) {
     instID := toOKXInstID(symbol)
+    if instID == "" {
+        return nil, fmt.Errorf("unknown symbol for OKX: %s", symbol)
+    }
     bar := interval
     if strings.HasSuffix(interval, "h") || strings.HasSuffix(interval, "H") {
         // OKX使用大写H
@@ -258,12 +279,25 @@ func fetchOKXKlines(symbol, interval string, limit int) ([]Kline, error) {
 // toOKXInstID 将标准化符号转换为OKX instId（永续）
 // 例: BTCUSDT -> BTC-USDT-SWAP；OKBUSDT -> OKB-USDT-SWAP
 func toOKXInstID(symbol string) string {
-    s := strings.ToUpper(symbol)
+    // 与 trader/okx_trader.go 保持一致的校验逻辑
+    s := strings.ToUpper(strings.TrimSpace(symbol))
+    if s == "" {
+        return ""
+    }
+    if s == "OKXUSDT" {
+        return ""
+    }
     if strings.HasSuffix(s, "USDT") {
         base := strings.TrimSuffix(s, "USDT")
+        if base == "" || base == "OKX" {
+            return ""
+        }
+        if s == "OKBUSDT" || base == "OKB" {
+            return "OKB-USDT-SWAP"
+        }
         return base + "-USDT-SWAP"
     }
-    return s + "-SWAP"
+    return ""
 }
 
 // calculateEMA 计算EMA

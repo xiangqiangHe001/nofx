@@ -32,11 +32,14 @@ func main() {
 		log.Fatalf("❌ 加载配置失败: %v", err)
 	}
 
-	log.Printf("✓ 配置加载成功，共%d个trader参赛", len(cfg.Traders))
-	fmt.Println()
+    log.Printf("✓ 配置加载成功，共%d个trader参赛", len(cfg.Traders))
+    fmt.Println()
 
-	// 设置默认主流币种列表
-	pool.SetDefaultCoins(cfg.DefaultCoins)
+    // 设置默认主流币种列表
+    pool.SetDefaultCoins(cfg.DefaultCoins)
+
+    // 启用白名单（使用配置中的默认币种作为白名单）
+    pool.SetWhitelistCoins(cfg.DefaultCoins)
 
 	// 设置是否使用默认主流币种
 	pool.SetUseDefaultCoins(cfg.UseDefaultCoins)

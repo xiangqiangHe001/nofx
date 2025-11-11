@@ -1,28 +1,31 @@
 package pool
 
 import (
-	"encoding/json"
-	"fmt"
-	"io/ioutil"
-	"log"
-	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
-	"time"
+    "encoding/json"
+    "fmt"
+    "io/ioutil"
+    "log"
+    "net/http"
+    "os"
+    "path/filepath"
+    "strings"
+    "time"
 )
 
 // defaultMainstreamCoins 默认主流币种池（从配置文件读取）
 var defaultMainstreamCoins = []string{
-	"BTCUSDT",
-	"ETHUSDT",
-	"SOLUSDT",
-	"BNBUSDT",
-	"XRPUSDT",
-	"DOGEUSDT",
-	"ADAUSDT",
-	"HYPEUSDT",
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "ADAUSDT",
+    "HYPEUSDT",
 }
+
+// whitelistCoins 币种白名单（若非空，仅允许此列表内的符号）
+var whitelistCoins []string
 
 // CoinPoolConfig 币种池配置
 type CoinPoolConfig struct {
@@ -85,10 +88,30 @@ func SetUseDefaultCoins(useDefault bool) {
 
 // SetDefaultCoins 设置默认主流币种列表
 func SetDefaultCoins(coins []string) {
-	if len(coins) > 0 {
-		defaultMainstreamCoins = coins
+    if len(coins) > 0 {
+        defaultMainstreamCoins = coins
         log.Printf("Default coin pool set (total %d): %v", len(coins), coins)
-	}
+    }
+}
+
+// SetWhitelistCoins 设置币种白名单
+func SetWhitelistCoins(coins []string) {
+    // 规范化并去重
+    seen := make(map[string]bool)
+    var wl []string
+    for _, c := range coins {
+        s := normalizeSymbol(c)
+        if !seen[s] {
+            seen[s] = true
+            wl = append(wl, s)
+        }
+    }
+    whitelistCoins = wl
+    if len(whitelistCoins) > 0 {
+        log.Printf("✓ 启用币种白名单（%d项）: %v", len(whitelistCoins), whitelistCoins)
+    } else {
+        log.Printf("币种白名单为空，允许全部候选符号")
+    }
 }
 
 // GetCoinPool 获取币种池列表（带重试和缓存机制）
@@ -252,10 +275,10 @@ func loadCoinPoolCache() ([]CoinInfo, error) {
 
 // GetAvailableCoins 获取可用的币种列表（过滤不可用的）
 func GetAvailableCoins() ([]string, error) {
-	coins, err := GetCoinPool()
-	if err != nil {
-		return nil, err
-	}
+    coins, err := GetCoinPool()
+    if err != nil {
+        return nil, err
+    }
 
 	var symbols []string
 	for _, coin := range coins {
@@ -266,19 +289,22 @@ func GetAvailableCoins() ([]string, error) {
 		}
 	}
 
-	if len(symbols) == 0 {
-		return nil, fmt.Errorf("没有可用的币种")
-	}
+    // 应用白名单过滤
+    symbols = applyWhitelist(symbols)
 
-	return symbols, nil
+    if len(symbols) == 0 {
+        return nil, fmt.Errorf("没有可用的币种")
+    }
+
+    return symbols, nil
 }
 
 // GetTopRatedCoins 获取评分最高的N个币种（按评分从大到小排序）
 func GetTopRatedCoins(limit int) ([]string, error) {
-	coins, err := GetCoinPool()
-	if err != nil {
-		return nil, err
-	}
+    coins, err := GetCoinPool()
+    if err != nil {
+        return nil, err
+    }
 
 	// 过滤可用的币种
 	var availableCoins []CoinInfo
@@ -307,13 +333,16 @@ func GetTopRatedCoins(limit int) ([]string, error) {
 		maxCount = len(availableCoins)
 	}
 
-	var symbols []string
-	for i := 0; i < maxCount; i++ {
-		symbol := normalizeSymbol(availableCoins[i].Pair)
-		symbols = append(symbols, symbol)
-	}
+    var symbols []string
+    for i := 0; i < maxCount; i++ {
+        symbol := normalizeSymbol(availableCoins[i].Pair)
+        symbols = append(symbols, symbol)
+    }
 
-	return symbols, nil
+    // 应用白名单过滤
+    symbols = applyWhitelist(symbols)
+
+    return symbols, nil
 }
 
 // normalizeSymbol 标准化币种符号
@@ -565,10 +594,10 @@ func loadOITopCache() ([]OIPosition, error) {
 
 // GetOITopSymbols 获取OI Top的币种符号列表
 func GetOITopSymbols() ([]string, error) {
-	positions, err := GetOITopPositions()
-	if err != nil {
-		return nil, err
-	}
+    positions, err := GetOITopPositions()
+    if err != nil {
+        return nil, err
+    }
 
 	var symbols []string
 	for _, pos := range positions {
@@ -576,7 +605,9 @@ func GetOITopSymbols() ([]string, error) {
 		symbols = append(symbols, symbol)
 	}
 
-	return symbols, nil
+    // 应用白名单过滤
+    symbols = applyWhitelist(symbols)
+    return symbols, nil
 }
 
 // MergedCoinPool 合并的币种池（AI500 + OI Top）
@@ -621,15 +652,19 @@ func GetMergedCoinPool(ai500Limit int) (*MergedCoinPool, error) {
 		symbolSources[symbol] = append(symbolSources[symbol], "oi_top")
 	}
 
-	// 转换为数组
-	var allSymbols []string
-	for symbol := range symbolSet {
-		allSymbols = append(allSymbols, symbol)
-	}
+    // 转换为数组
+    var allSymbols []string
+    for symbol := range symbolSet {
+        allSymbols = append(allSymbols, symbol)
+    }
 
-	// 获取完整数据
-	ai500Coins, _ := GetCoinPool()
-	oiTopPositions, _ := GetOITopPositions()
+    // 应用白名单过滤
+    before := len(allSymbols)
+    allSymbols = applyWhitelist(allSymbols)
+
+    // 获取完整数据
+    ai500Coins, _ := GetCoinPool()
+    oiTopPositions, _ := GetOITopPositions()
 
 	merged := &MergedCoinPool{
 		AI500Coins:    ai500Coins,
@@ -638,8 +673,27 @@ func GetMergedCoinPool(ai500Limit int) (*MergedCoinPool, error) {
 		SymbolSources: symbolSources,
 	}
 
-    log.Printf("Coin pool merge complete: AI500=%d, OI_Top=%d, total(dedup)=%d",
-        len(ai500TopSymbols), len(oiTopSymbols), len(allSymbols))
+    log.Printf("Coin pool merge complete: AI500=%d, OI_Top=%d, total(dedup)=%d, after_whitelist=%d",
+        len(ai500TopSymbols), len(oiTopSymbols), before, len(allSymbols))
 
-	return merged, nil
+    return merged, nil
+}
+
+// applyWhitelist 依据白名单过滤符号列表（若白名单为空则不处理）
+func applyWhitelist(symbols []string) []string {
+    if len(whitelistCoins) == 0 {
+        return symbols
+    }
+    allowed := make(map[string]bool)
+    for _, s := range whitelistCoins {
+        allowed[s] = true
+    }
+    var out []string
+    for _, s := range symbols {
+        ns := normalizeSymbol(s)
+        if allowed[ns] {
+            out = append(out, ns)
+        }
+    }
+    return out
 }

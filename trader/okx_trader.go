@@ -1026,28 +1026,45 @@ func (o *OKXTrader) SetLeverage(symbol string, leverage int) error {
 // GetMarketPrice 获取市场价格（使用OKX公开行情）
 func (o *OKXTrader) GetMarketPrice(symbol string) (float64, error) {
     instID := toOKXInstID(symbol)
-    url := fmt.Sprintf("%s/api/v5/market/ticker?instId=%s", o.baseURL, instID)
-    resp, err := o.client.Get(url)
-    if err != nil {
-        return 0, err
+    if instID == "" {
+        return 0, fmt.Errorf("unknown symbol for OKX: %s", symbol)
     }
-    defer resp.Body.Close()
+    var lastErr error
+    for attempt := 1; attempt <= 3; attempt++ {
+        url := fmt.Sprintf("%s/api/v5/market/ticker?instId=%s", o.baseURL, instID)
+        resp, err := o.client.Get(url)
+        if err != nil {
+            lastErr = err
+            time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+            continue
+        }
 
-    var payload struct {
-        Code string `json:"code"`
-        Msg  string `json:"msg"`
-        Data []struct {
-            Last string `json:"last"`
-        } `json:"data"`
-    }
+        var payload struct {
+            Code string `json:"code"`
+            Msg  string `json:"msg"`
+            Data []struct {
+                Last string `json:"last"`
+            } `json:"data"`
+        }
 
-    if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-        return 0, err
+        decodeErr := json.NewDecoder(resp.Body).Decode(&payload)
+        resp.Body.Close()
+        if decodeErr != nil {
+            lastErr = decodeErr
+            time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+            continue
+        }
+        if payload.Code != "0" || len(payload.Data) == 0 {
+            lastErr = fmt.Errorf("OKX ticker API error: code=%s msg=%s", payload.Code, payload.Msg)
+            time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+            continue
+        }
+        return parseFloat(payload.Data[0].Last), nil
     }
-    if payload.Code != "0" || len(payload.Data) == 0 {
-        return 0, fmt.Errorf("OKX ticker API error: code=%s msg=%s", payload.Code, payload.Msg)
+    if lastErr != nil {
+        return 0, lastErr
     }
-    return parseFloat(payload.Data[0].Last), nil
+    return 0, fmt.Errorf("failed to fetch market price after 3 attempts")
 }
 
 // SetStopLoss 设置止损
@@ -1359,13 +1376,28 @@ func (o *OKXTrader) GetFills(limit int) ([]map[string]interface{}, error) {
 // toOKXInstID 将标准化的Binance符号转换为OKX instId（永续合约）
 // 例: BTCUSDT -> BTC-USDT-SWAP
 func toOKXInstID(symbol string) string {
-    s := strings.ToUpper(symbol)
+    // 仅接受标准 USDT 计价符号；未知或不合法返回空字符串以阻止发起请求
+    s := strings.ToUpper(strings.TrimSpace(symbol))
+    if s == "" {
+        return ""
+    }
+    // 显式拦截不合法的平台符号
+    if s == "OKXUSDT" {
+        return ""
+    }
     if strings.HasSuffix(s, "USDT") {
         base := strings.TrimSuffix(s, "USDT")
+        if base == "" || base == "OKX" {
+            return ""
+        }
+        // 特殊规范化：OKB
+        if s == "OKBUSDT" || base == "OKB" {
+            return "OKB-USDT-SWAP"
+        }
         return base + "-USDT-SWAP"
     }
-    // 回退：直接加 -SWAP
-    return s + "-SWAP"
+    // 非 USDT 计价不支持（当前策略仅支持 USDT 永续）
+    return ""
 }
 
 // fromOKXInstID 将OKX instId转换为标准符号
