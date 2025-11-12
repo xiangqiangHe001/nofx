@@ -1,26 +1,46 @@
 现在请分析并输出决策（先给出简短的思维链，然后给出严格的 JSON）。
 
+排序与组合规则（强约束）：
+- 同一轮决策必须“先平后开”：若需换仓，先输出 close_*，再输出 open_*。
+- 已有持仓的币种只能输出 hold 或 close_*；严禁再次 open_*（系统会拒绝同币种同方向重复开仓）。
+- 新开仓前必须自查：总保证金使用率≤60%，当前持仓数≤3；若不满足，输出 wait 而非 open_*。
+- 单仓位保证金默认≤60%账户净值（position_size_usd/leverage），除非你“强信心”且给出充分理由（思维链注明），否则不要超过。
+
 输出要求：
 - 仅允许的动作："open_long", "open_short", "close_long", "close_short", "hold", "wait"。
-- 当动作为 "open_long" 或 "open_short" 时，必须给出以下字段：
+- 对所有动作，请给出：
+  - "symbol"：交易币种，格式必须为 "BTCUSDT"（简写如 "BTC" 会自动视为 "BTCUSDT"）。
+    - 当动作为 "close_long" 或 "close_short" 时，若当前仅有唯一对应持仓，允许省略或留空；否则必须明确指定。
+  - "confidence"：0–1 的置信度。
+  - "risk_usd"：本次决策的风险敞口估算（美元）。
+- 当动作为 "open_long" 或 "open_short" 时，此外必须给出：
   - "position_size_usd"：开仓的美元规模，正数。
   - "leverage"：杠杆倍数，正数。
   - "stop_loss"：止损价位（与当前品种价格同一计量单位）。
   - "take_profit"：一次性止盈价位（与当前品种价格同一计量单位）。
-- 对所有动作均应给出：
-  - "confidence"：0–1 的置信度。
-  - "risk_usd"：本次决策的风险敞口估算（美元）。
 
-请严格输出如下 JSON 数组格式（示例值仅演示，实际请替换为你的决策）：
+额外校验（必须在思维链中说明结果）：
+- 当前账户总保证金使用率（MarginUsedPct）≤60%，否则不要开新仓；若因先平后开而释放保证金，请明确说明并在 JSON 中体现先 close_* 再 open_* 的顺序。
+- 当前持仓数量≤3；若达到上限，输出 wait。
+- 单仓位保证金（position_size_usd/leverage）默认≤60%账户净值；超过时需“强信心”且给出充分理由。
+
+请严格输出如下 JSON 数组格式（示例顺序演示“先平后开”，实际请替换为你的决策）：
 [
   {
-    "action": "open_long",
-    "position_size_usd": 1000,
-    "leverage": 3,
-    "stop_loss": 2.345,
-    "take_profit": 2.789,
-    "confidence": 0.72,
-    "risk_usd": 150
+    "action": "close_short",
+    "symbol": "BTCUSDT",
+    "confidence": 0.78,
+    "risk_usd": 0
+  },
+  {
+    "action": "open_short",
+    "symbol": "ETHUSDT",
+    "position_size_usd": 1500,
+    "leverage": 5,
+    "stop_loss": 3620.5,
+    "take_profit": 3350.0,
+    "confidence": 0.82,
+    "risk_usd": 180
   }
 ]
 

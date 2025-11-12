@@ -44,6 +44,7 @@ export interface Position {
   leverage: number;
   unrealized_pnl: number;
   unrealized_pnl_pct: number;
+  unrealized_pnl_pct_margin: number;
   liquidation_price: number;
   margin_used: number;
 }

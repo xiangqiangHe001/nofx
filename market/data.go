@@ -72,8 +72,16 @@ var httpClient = &http.Client{Timeout: 15 * time.Second, Transport: &http.Transp
 
 // Get 获取指定代币的市场数据
 func Get(symbol string) (*Data, error) {
-	// 标准化symbol
-	symbol = Normalize(symbol)
+    // 标准化并校验 symbol（避免空符号被规范化为 USDT 导致下游错误）
+    raw := strings.TrimSpace(symbol)
+    symbol = Normalize(raw)
+    up := strings.ToUpper(symbol)
+    if raw == "" || up == "USDT" || up == "OKXUSDT" {
+        return nil, fmt.Errorf("invalid symbol: '%s' (must be like BTCUSDT)", raw)
+    }
+    if !strings.HasSuffix(up, "USDT") || len(up) <= len("USDT") {
+        return nil, fmt.Errorf("unsupported symbol format: '%s' (must end with USDT)", up)
+    }
 
 	// 获取3分钟K线数据 (最近10个)
     klines3m, err := getKlines(symbol, "3m", 40) // fetch more for indicators
@@ -647,11 +655,15 @@ func formatFloatSlice(values []float64) string {
 
 // Normalize 标准化symbol,确保是USDT交易对
 func Normalize(symbol string) string {
-	symbol = strings.ToUpper(symbol)
-	if strings.HasSuffix(symbol, "USDT") {
-		return symbol
-	}
-	return symbol + "USDT"
+    s := strings.ToUpper(strings.TrimSpace(symbol))
+    // 空或仅USDT不进行规范化，交由调用方判错
+    if s == "" || s == "USDT" {
+        return s
+    }
+    if strings.HasSuffix(s, "USDT") {
+        return s
+    }
+    return s + "USDT"
 }
 
 // parseFloat 解析float值

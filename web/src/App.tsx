@@ -482,6 +482,28 @@ function TraderDetailsPage({
           change={account?.total_pnl_pct || 0}
           positive={(account?.total_pnl ?? 0) >= 0}
         />
+        {positions && positions.length > 0 && (
+          (() => {
+            const sumPnl = positions.reduce((acc: number, p: any) => acc + (p.unrealized_pnl || 0), 0);
+            const sumMargin = positions.reduce((acc: number, p: any) => acc + (p.margin_used || 0), 0);
+            const marginPnLPct = sumMargin > 0 ? (sumPnl / sumMargin) * 100 : 0;
+            const positive = sumPnl >= 0;
+            return (
+              <div className="stat-card animate-fade-in">
+                <div className="text-xs mb-2 mono uppercase tracking-wider" style={{ color: '#848E9C' }}>
+                  <span className="inline-flex items-center gap-1">
+                    {t('unrealizedPnL', language)}
+                    <span className="text-gray-500 cursor-help" title={t('pnlMarginTooltip', language)}>ℹ️</span>
+                  </span>
+                </div>
+                <div className="text-2xl font-bold mb-1 mono" style={{ color: positive ? '#0ECB81' : '#F6465D' }}>
+                  {positive ? '+' : ''}{sumPnl.toFixed(2)} USDT ({marginPnLPct.toFixed(2)}%)
+                </div>
+              </div>
+            );
+          })()
+        )}
+        {/* 移除重复的小模块：持仓盈亏（保证金）与总盈亏百分比（保证金）统计卡 */}
         <StatCard
           title={t('positions', language)}
           value={`${account?.position_count || 0}`}
@@ -522,7 +544,12 @@ function TraderDetailsPage({
                   <th className="pb-3 font-semibold text-gray-400">{t('quantity', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('positionValue', language)}</th>
                   <th className="pb-3 font-semibold text-gray-400">{t('leverage', language)}</th>
-                  <th className="pb-3 font-semibold text-gray-400">{t('unrealizedPnL', language)}</th>
+                  <th className="pb-3 font-semibold text-gray-400">
+                    <span className="inline-flex items-center gap-1">
+                      {t('unrealizedPnL', language)}
+                      <span className="text-gray-500 cursor-help" title={t('pnlMarginTooltip', language)}>ℹ️</span>
+                    </span>
+                  </th>
                   <th className="pb-3 font-semibold text-gray-400">{t('liqPrice', language)}</th>
                 </tr>
               </thead>
@@ -553,7 +580,7 @@ function TraderDetailsPage({
                         style={{ color: pos.unrealized_pnl >= 0 ? '#0ECB81' : '#F6465D', fontWeight: 'bold' }}
                       >
                         {pos.unrealized_pnl >= 0 ? '+' : ''}
-                        {pos.unrealized_pnl.toFixed(2)} ({pos.unrealized_pnl_pct.toFixed(2)}%)
+                        {pos.unrealized_pnl.toFixed(2)} ({pos.unrealized_pnl_pct_margin.toFixed(2)}%)
                       </span>
                     </td>
                     <td className="py-3 font-mono" style={{ color: '#848E9C' }}>

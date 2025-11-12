@@ -340,6 +340,15 @@ func (at *AutoTrader) Run() error {
     log.Printf("💰 初始余额: %.2f USDT | 额外投入: %.2f USDT | 总投入: %.2f USDT", at.initialBalance, at.config.ExtraInvestment, at.initialBalance+at.config.ExtraInvestment)
     log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
     log.Printf("🛡️  最小风险回报比: %.2f", at.config.MinRiskRewardRatio)
+    // 显示当前启动使用的提示词模板（来自环境变量 NOFX_PROMPT_VARIANT，未设置则回退为默认）
+    func() {
+        variant := os.Getenv("NOFX_PROMPT_VARIANT")
+        if strings.TrimSpace(variant) == "" {
+            variant = prompt.DefaultVariant
+        }
+        // 提示系统模板文件名，便于快速确认实际使用的模板
+        log.Printf("🧩 当前提示词模板: %s (prompt/system_%s.txt)", variant, variant)
+    }()
     log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
 
     ticker := time.NewTicker(at.config.ScanInterval)
@@ -582,6 +591,125 @@ func (at *AutoTrader) runCycle() error {
             record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("Auto-trading disabled: simulate %s %s", d.Symbol, d.Action))
         }
 
+        // 预算与持仓硬约束：对 open_* 执行前进行全局保证金与持仓数量校验
+        if d.Action == "open_long" || d.Action == "open_short" {
+            // 获取当前账户信息
+            acct, err := at.GetAccountInfo()
+            if err != nil {
+                log.Printf("⚠️ 获取账户信息失败，跳过开仓 %s %s: %v", d.Symbol, d.Action, err)
+                actionRecord.Error = fmt.Sprintf("get account info failed: %v", err)
+                record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("%s %s skipped: account info error", d.Symbol, d.Action))
+                record.Decisions = append(record.Decisions, actionRecord)
+                continue
+            }
+
+            // 安全转换辅助
+            toFloat := func(v interface{}) float64 {
+                switch x := v.(type) {
+                case float64:
+                    return x
+                case float32:
+                    return float64(x)
+                case int:
+                    return float64(x)
+                case int64:
+                    return float64(x)
+                case string:
+                    if f, err := strconv.ParseFloat(x, 64); err == nil {
+                        return f
+                    }
+                    return 0
+                default:
+                    return 0
+                }
+            }
+            toInt := func(v interface{}) int {
+                switch x := v.(type) {
+                case int:
+                    return x
+                case int64:
+                    return int(x)
+                case float64:
+                    return int(x)
+                case string:
+                    if i, err := strconv.Atoi(x); err == nil {
+                        return i
+                    }
+                    return 0
+                default:
+                    return 0
+                }
+            }
+
+            totalEquity := toFloat(acct["total_equity"]) // 钱包 + 未实现盈亏
+            marginUsed := toFloat(acct["margin_used"])   // 当前占用保证金
+            positionCount := toInt(acct["position_count"]) // 当前持仓数量
+
+            // 最多持仓≤3
+            if positionCount >= 3 {
+                msg := fmt.Sprintf("❌ 持仓数量已达上限(%d)，拒绝新开仓 %s", positionCount, d.Symbol)
+                log.Println(msg)
+                actionRecord.Error = "position_count_limit"
+                record.ExecutionLog = append(record.ExecutionLog, msg)
+                record.Decisions = append(record.Decisions, actionRecord)
+                continue
+            }
+
+            // 动态调整：在不超过60%保证金上限的前提下，优先提升杠杆至配置值，其次缩小仓位USD
+            // 可用保证金空间（按60%上限）
+            if totalEquity <= 0 {
+                log.Printf("⚠️ total_equity<=0，无法计算保证金占用，暂不应用全局预算限制：%s %s", d.Symbol, d.Action)
+            } else {
+                maxBudget := 0.60*totalEquity
+                allowedMargin := maxBudget - marginUsed
+                if allowedMargin <= 0 {
+                    msg := fmt.Sprintf("❌ 全局保证金上限已用尽(%.2f%%≥60%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, d.Symbol)
+                    log.Println(msg)
+                    actionRecord.Error = "margin_budget_exhausted"
+                    record.ExecutionLog = append(record.ExecutionLog, msg)
+                    record.Decisions = append(record.Decisions, actionRecord)
+                    continue
+                }
+
+                // 计算配置期望杠杆（BTC/ETH 使用 BTCETHLeverage，其它币使用 AltcoinLeverage）
+                symU := strings.ToUpper(d.Symbol)
+                cfgLev := at.config.AltcoinLeverage
+                if strings.HasPrefix(symU, "BTC") || strings.HasPrefix(symU, "ETH") {
+                    cfgLev = at.config.BTCETHLeverage
+                }
+                // 目标杠杆：若AI建议较低，则提升至配置值；若AI更高则沿用AI值
+                targetLev := d.Leverage
+                if targetLev <= 0 { targetLev = 1 }
+                if targetLev < cfgLev { targetLev = cfgLev }
+
+                // 计算在保持原USD下满足预算所需的杠杆
+                requiredLev := int(math.Ceil(d.PositionSizeUSD / allowedMargin))
+                if requiredLev < 1 { requiredLev = 1 }
+                if requiredLev < targetLev { requiredLev = targetLev }
+
+                // 在所需/目标杠杆下的允许USD
+                allowedUSD := allowedMargin * float64(requiredLev)
+
+                if d.PositionSizeUSD > allowedUSD {
+                    // 原计划USD超出预算，在提升杠杆至所需后仍不足，则缩仓到允许USD
+                    oldUSD := d.PositionSizeUSD
+                    oldLev := d.Leverage
+                    d.Leverage = requiredLev
+                    d.PositionSizeUSD = allowedUSD
+                    msg := fmt.Sprintf("⚠️ 预算门控：%s 杠杆 %dx→%dx；仓位 %.2fUSD→%.2fUSD，满足60%%预算", d.Symbol, oldLev, d.Leverage, oldUSD, d.PositionSizeUSD)
+                    log.Println(msg)
+                    record.ExecutionLog = append(record.ExecutionLog, msg)
+                } else if d.Leverage < requiredLev {
+                    // 原计划USD在预算内，但杠杆低于所需/配置，则提升杠杆以更安全地占用预算
+                    oldLev := d.Leverage
+                    d.Leverage = requiredLev
+                    msg := fmt.Sprintf("ℹ️ 调整杠杆以满足预算/配置：%s 杠杆 %dx→%dx；保留原USD %.2f", d.Symbol, oldLev, d.Leverage, d.PositionSizeUSD)
+                    log.Println(msg)
+                    record.ExecutionLog = append(record.ExecutionLog, msg)
+                }
+            }
+        }
+
         if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
             log.Printf("Decision execution failed (%s %s): %v", d.Symbol, d.Action, err)
             actionRecord.Error = err.Error()
@@ -674,21 +802,19 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		unrealizedPnl := pos["unRealizedProfit"].(float64)
 		liquidationPrice := pos["liquidationPrice"].(float64)
 
-		// 计算盈亏百分比
-		pnlPct := 0.0
-		if side == "long" {
-			pnlPct = ((markPrice - entryPrice) / entryPrice) * 100
-		} else {
-			pnlPct = ((entryPrice - markPrice) / entryPrice) * 100
-		}
+        // 计算占用保证金（估算）
+        leverage := 10 // 默认值，实际应该从持仓信息获取
+        if lev, ok := pos["leverage"].(float64); ok {
+            leverage = int(lev)
+        }
+        marginUsed := (quantity * markPrice) / float64(leverage)
+        totalMarginUsed += marginUsed
 
-		// 计算占用保证金（估算）
-		leverage := 10 // 默认值，实际应该从持仓信息获取
-		if lev, ok := pos["leverage"].(float64); ok {
-			leverage = int(lev)
-		}
-		marginUsed := (quantity * markPrice) / float64(leverage)
-		totalMarginUsed += marginUsed
+        // 计算盈亏百分比（相对保证金/加杠杆前的仓位价值）
+        pnlPct := 0.0
+        if marginUsed > 0 {
+            pnlPct = (unrealizedPnl / marginUsed) * 100
+        }
 
 		// 跟踪持仓首次出现时间
 		posKey := symbol + "_" + side
@@ -735,15 +861,24 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		return nil, fmt.Errorf("获取合并币种池失败: %w", err)
 	}
 
-	// 构建候选币种列表（包含来源信息）
-	var candidateCoins []decision.CandidateCoin
-	for _, symbol := range mergedPool.AllSymbols {
-		sources := mergedPool.SymbolSources[symbol]
-		candidateCoins = append(candidateCoins, decision.CandidateCoin{
-			Symbol:  symbol,
-			Sources: sources, // "ai500" 和/或 "oi_top"
-		})
-	}
+    // 构建候选币种列表（包含来源信息）
+    // 过滤无效符号，避免空、仅USDT或平台名等进入分析流程
+    isValidCandidate := func(sym string) bool {
+        s := strings.ToUpper(strings.TrimSpace(sym))
+        if s == "" || s == "USDT" { return false }
+        if !strings.HasSuffix(s, "USDT") { return false }
+        if s == "OKXUSDT" { return false }
+        return true
+    }
+    var candidateCoins []decision.CandidateCoin
+    for _, symbol := range mergedPool.AllSymbols {
+        if !isValidCandidate(symbol) { continue }
+        sources := mergedPool.SymbolSources[symbol]
+        candidateCoins = append(candidateCoins, decision.CandidateCoin{
+            Symbol:  symbol,
+            Sources: sources, // "ai500" 和/或 "oi_top"
+        })
+    }
 
 	log.Printf("📋 合并币种池: AI500前%d + OI_Top20 = 总计%d个候选币种",
 		ai500Limit, len(candidateCoins))
@@ -832,6 +967,93 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 
     log.Printf("  📈 开多仓: %s", decision.Symbol)
 
+    // 全局预算与持仓上限硬约束
+    {
+        acct, aerr := at.GetAccountInfo()
+        if aerr != nil {
+            log.Printf("⚠️ 获取账户信息失败，暂不应用全局预算限制：%s %s: %v", decision.Symbol, decision.Action, aerr)
+        } else {
+            positionsCount := 0
+            if pc, ok := acct["position_count"]; ok {
+                switch x := pc.(type) {
+                case int:
+                    positionsCount = x
+                case int64:
+                    positionsCount = int(x)
+                case float64:
+                    positionsCount = int(x)
+                case float32:
+                    positionsCount = int(x)
+                }
+            }
+            if positionsCount >= 3 {
+                return fmt.Errorf("❌ 持仓数量已达上限(≥3)，拒绝开仓 %s", decision.Symbol)
+            }
+
+            marginUsed := 0.0
+            if mu, ok := acct["margin_used"]; ok {
+                switch x := mu.(type) {
+                case float64:
+                    marginUsed = x
+                case float32:
+                    marginUsed = float64(x)
+                case int:
+                    marginUsed = float64(x)
+                case int64:
+                    marginUsed = float64(x)
+                }
+            }
+            totalEquity := 0.0
+            if te, ok := acct["total_equity"]; ok {
+                switch x := te.(type) {
+                case float64:
+                    totalEquity = x
+                case float32:
+                    totalEquity = float64(x)
+                case int:
+                    totalEquity = float64(x)
+                case int64:
+                    totalEquity = float64(x)
+                }
+            }
+            // 动态预算适配：优先提升杠杆至配置值，其次缩小仓位USD
+            if totalEquity <= 0 {
+                log.Printf("⚠️ total_equity<=0，无法计算保证金占用，暂不应用全局预算限制：%s %s", decision.Symbol, decision.Action)
+            } else {
+                maxBudget := 0.60*totalEquity
+                allowedMargin := maxBudget - marginUsed
+                if allowedMargin <= 0 {
+                    return fmt.Errorf("❌ 全局保证金上限已用尽(%.2f%%≥60%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, decision.Symbol)
+                }
+
+                symU := strings.ToUpper(decision.Symbol)
+                cfgLev := at.config.AltcoinLeverage
+                if strings.HasPrefix(symU, "BTC") || strings.HasPrefix(symU, "ETH") { cfgLev = at.config.BTCETHLeverage }
+                targetLev := decision.Leverage
+                if targetLev <= 0 { targetLev = 1 }
+                if targetLev < cfgLev { targetLev = cfgLev }
+
+                requiredLev := int(math.Ceil(decision.PositionSizeUSD / allowedMargin))
+                if requiredLev < 1 { requiredLev = 1 }
+                if requiredLev < targetLev { requiredLev = targetLev }
+
+                allowedUSD := allowedMargin * float64(requiredLev)
+
+                if decision.PositionSizeUSD > allowedUSD {
+                    oldUSD := decision.PositionSizeUSD
+                    oldLev := decision.Leverage
+                    decision.Leverage = requiredLev
+                    decision.PositionSizeUSD = allowedUSD
+                    log.Printf("⚠️ 预算门控：%s 杠杆 %dx→%dx；仓位 %.2fUSD→%.2fUSD，满足60%%预算", decision.Symbol, oldLev, decision.Leverage, oldUSD, decision.PositionSizeUSD)
+                } else if decision.Leverage < requiredLev {
+                    oldLev := decision.Leverage
+                    decision.Leverage = requiredLev
+                    log.Printf("ℹ️ 调整杠杆以满足预算/配置：%s 杠杆 %dx→%dx；保留原USD %.2f", decision.Symbol, oldLev, decision.Leverage, decision.PositionSizeUSD)
+                }
+            }
+        }
+    }
+
     // ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）
     positions, err := at.trader.GetPositions()
     if err == nil {
@@ -841,6 +1063,11 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
             }
         }
     }
+
+    // 根据可能调整过的 USD 与杠杆，重新计算下单数量
+    quantity = decision.PositionSizeUSD / marketData.CurrentPrice
+    actionRecord.Quantity = quantity
+    actionRecord.Leverage = decision.Leverage
 
     // 开仓
     order, err := at.trader.OpenLong(decision.Symbol, quantity, decision.Leverage)
@@ -889,6 +1116,93 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 
     log.Printf("  📉 开空仓: %s", decision.Symbol)
 
+    // 全局预算与持仓上限硬约束
+    {
+        acct, aerr := at.GetAccountInfo()
+        if aerr != nil {
+            log.Printf("⚠️ 获取账户信息失败，暂不应用全局预算限制：%s %s: %v", decision.Symbol, decision.Action, aerr)
+        } else {
+            positionsCount := 0
+            if pc, ok := acct["position_count"]; ok {
+                switch x := pc.(type) {
+                case int:
+                    positionsCount = x
+                case int64:
+                    positionsCount = int(x)
+                case float64:
+                    positionsCount = int(x)
+                case float32:
+                    positionsCount = int(x)
+                }
+            }
+            if positionsCount >= 3 {
+                return fmt.Errorf("❌ 持仓数量已达上限(≥3)，拒绝开仓 %s", decision.Symbol)
+            }
+
+            marginUsed := 0.0
+            if mu, ok := acct["margin_used"]; ok {
+                switch x := mu.(type) {
+                case float64:
+                    marginUsed = x
+                case float32:
+                    marginUsed = float64(x)
+                case int:
+                    marginUsed = float64(x)
+                case int64:
+                    marginUsed = float64(x)
+                }
+            }
+            totalEquity := 0.0
+            if te, ok := acct["total_equity"]; ok {
+                switch x := te.(type) {
+                case float64:
+                    totalEquity = x
+                case float32:
+                    totalEquity = float64(x)
+                case int:
+                    totalEquity = float64(x)
+                case int64:
+                    totalEquity = float64(x)
+                }
+            }
+            // 动态预算适配：优先提升杠杆至配置值，其次缩小仓位USD
+            if totalEquity <= 0 {
+                log.Printf("⚠️ total_equity<=0，无法计算保证金占用，暂不应用全局预算限制：%s %s", decision.Symbol, decision.Action)
+            } else {
+                maxBudget := 0.60*totalEquity
+                allowedMargin := maxBudget - marginUsed
+                if allowedMargin <= 0 {
+                    return fmt.Errorf("❌ 全局保证金上限已用尽(%.2f%%≥60%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, decision.Symbol)
+                }
+
+                symU := strings.ToUpper(decision.Symbol)
+                cfgLev := at.config.AltcoinLeverage
+                if strings.HasPrefix(symU, "BTC") || strings.HasPrefix(symU, "ETH") { cfgLev = at.config.BTCETHLeverage }
+                targetLev := decision.Leverage
+                if targetLev <= 0 { targetLev = 1 }
+                if targetLev < cfgLev { targetLev = cfgLev }
+
+                requiredLev := int(math.Ceil(decision.PositionSizeUSD / allowedMargin))
+                if requiredLev < 1 { requiredLev = 1 }
+                if requiredLev < targetLev { requiredLev = targetLev }
+
+                allowedUSD := allowedMargin * float64(requiredLev)
+
+                if decision.PositionSizeUSD > allowedUSD {
+                    oldUSD := decision.PositionSizeUSD
+                    oldLev := decision.Leverage
+                    decision.Leverage = requiredLev
+                    decision.PositionSizeUSD = allowedUSD
+                    log.Printf("⚠️ 预算门控：%s 杠杆 %dx→%dx；仓位 %.2fUSD→%.2fUSD，满足60%%预算", decision.Symbol, oldLev, decision.Leverage, oldUSD, decision.PositionSizeUSD)
+                } else if decision.Leverage < requiredLev {
+                    oldLev := decision.Leverage
+                    decision.Leverage = requiredLev
+                    log.Printf("ℹ️ 调整杠杆以满足预算/配置：%s 杠杆 %dx→%dx；保留原USD %.2f", decision.Symbol, oldLev, decision.Leverage, decision.PositionSizeUSD)
+                }
+            }
+        }
+    }
+
     // ⚠️ 关键：检查是否已有同币种同方向持仓，如果有则拒绝开仓（防止仓位叠加超限）
     positions, err := at.trader.GetPositions()
     if err == nil {
@@ -898,6 +1212,11 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
             }
         }
     }
+
+    // 根据可能调整过的 USD 与杠杆，重新计算下单数量
+    quantity = decision.PositionSizeUSD / marketData.CurrentPrice
+    actionRecord.Quantity = quantity
+    actionRecord.Leverage = decision.Leverage
 
     // 开仓
     order, err := at.trader.OpenShort(decision.Symbol, quantity, decision.Leverage)
@@ -945,6 +1264,70 @@ func (at *AutoTrader) ManualOpenLong(symbol string, usd float64, leverage int) (
         return nil, fmt.Errorf("USD仓位必须大于0")
     }
     quantity := usd / price
+
+    // 全局预算与持仓上限硬约束
+    {
+        acct, aerr := at.GetAccountInfo()
+        if aerr != nil {
+            log.Printf("⚠️ 获取账户信息失败，暂不应用全局预算限制：%s open_long: %v", symbol, aerr)
+        } else {
+            positionsCount := 0
+            if pc, ok := acct["position_count"]; ok {
+                switch x := pc.(type) {
+                case int:
+                    positionsCount = x
+                case int64:
+                    positionsCount = int(x)
+                case float64:
+                    positionsCount = int(x)
+                case float32:
+                    positionsCount = int(x)
+                }
+            }
+            if positionsCount >= 3 {
+                return nil, fmt.Errorf("❌ 持仓数量已达上限(≥3)，拒绝开仓 %s", symbol)
+            }
+
+            marginUsed := 0.0
+            if mu, ok := acct["margin_used"]; ok {
+                switch x := mu.(type) {
+                case float64:
+                    marginUsed = x
+                case float32:
+                    marginUsed = float64(x)
+                case int:
+                    marginUsed = float64(x)
+                case int64:
+                    marginUsed = float64(x)
+                }
+            }
+            totalEquity := 0.0
+            if te, ok := acct["total_equity"]; ok {
+                switch x := te.(type) {
+                case float64:
+                    totalEquity = x
+                case float32:
+                    totalEquity = float64(x)
+                case int:
+                    totalEquity = float64(x)
+                case int64:
+                    totalEquity = float64(x)
+                }
+            }
+            marginNeeded := 0.0
+            if leverage > 0 {
+                marginNeeded = usd / float64(leverage)
+            }
+            if totalEquity <= 0 {
+                log.Printf("⚠️ total_equity<=0，无法计算保证金占用，暂不应用全局预算限制：%s open_long", symbol)
+            } else {
+                projectedPct := ((marginUsed + marginNeeded) / totalEquity) * 100
+                if projectedPct > 60.0 {
+                    return nil, fmt.Errorf("❌ 预计保证金使用率将超限(%.2f%%→%.2f%%>60%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, projectedPct, symbol)
+                }
+            }
+        }
+    }
 
     // 防止同向仓位叠加
     positions, err := at.trader.GetPositions()
@@ -1021,6 +1404,70 @@ func (at *AutoTrader) ManualOpenShort(symbol string, usd float64, leverage int) 
         return nil, fmt.Errorf("USD仓位必须大于0")
     }
     quantity := usd / price
+
+    // 全局预算与持仓上限硬约束
+    {
+        acct, aerr := at.GetAccountInfo()
+        if aerr != nil {
+            log.Printf("⚠️ 获取账户信息失败，暂不应用全局预算限制：%s open_short: %v", symbol, aerr)
+        } else {
+            positionsCount := 0
+            if pc, ok := acct["position_count"]; ok {
+                switch x := pc.(type) {
+                case int:
+                    positionsCount = x
+                case int64:
+                    positionsCount = int(x)
+                case float64:
+                    positionsCount = int(x)
+                case float32:
+                    positionsCount = int(x)
+                }
+            }
+            if positionsCount >= 3 {
+                return nil, fmt.Errorf("❌ 持仓数量已达上限(≥3)，拒绝开仓 %s", symbol)
+            }
+
+            marginUsed := 0.0
+            if mu, ok := acct["margin_used"]; ok {
+                switch x := mu.(type) {
+                case float64:
+                    marginUsed = x
+                case float32:
+                    marginUsed = float64(x)
+                case int:
+                    marginUsed = float64(x)
+                case int64:
+                    marginUsed = float64(x)
+                }
+            }
+            totalEquity := 0.0
+            if te, ok := acct["total_equity"]; ok {
+                switch x := te.(type) {
+                case float64:
+                    totalEquity = x
+                case float32:
+                    totalEquity = float64(x)
+                case int:
+                    totalEquity = float64(x)
+                case int64:
+                    totalEquity = float64(x)
+                }
+            }
+            marginNeeded := 0.0
+            if leverage > 0 {
+                marginNeeded = usd / float64(leverage)
+            }
+            if totalEquity <= 0 {
+                log.Printf("⚠️ total_equity<=0，无法计算保证金占用，暂不应用全局预算限制：%s open_short", symbol)
+            } else {
+                projectedPct := ((marginUsed + marginNeeded) / totalEquity) * 100
+                if projectedPct > 60.0 {
+                    return nil, fmt.Errorf("❌ 预计保证金使用率将超限(%.2f%%→%.2f%%>60%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, projectedPct, symbol)
+                }
+            }
+        }
+    }
 
     // 防止同向仓位叠加
     positions, err := at.trader.GetPositions()
@@ -1176,6 +1623,34 @@ func (at *AutoTrader) ManualCloseShort(symbol string) (map[string]interface{}, e
 
 // executeCloseLongWithRecord 执行平多仓并记录详细信息
 func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+    // 先确保 symbol 有效；如果未指定或格式不正确，则根据当前持仓回退推断
+    {
+        sym := strings.TrimSpace(decision.Symbol)
+        up := strings.ToUpper(sym)
+        if sym == "" || up == "USDT" || up == "OKXUSDT" || !strings.HasSuffix(up, "USDT") {
+            positions, perr := at.trader.GetPositions()
+            if perr != nil {
+                return fmt.Errorf("决策未指定有效币种，且获取持仓失败: %v", perr)
+            }
+            var longSyms []string
+            for _, p := range positions {
+                if ps, ok := p["side"].(string); ok && ps == "long" {
+                    if s, ok := p["symbol"].(string); ok && s != "" {
+                        longSyms = append(longSyms, s)
+                    }
+                }
+            }
+            if len(longSyms) == 1 {
+                sym = longSyms[0]
+            } else if len(longSyms) == 0 {
+                return fmt.Errorf("未找到可平的多仓（无 long 仓位），且决策未指定有效币种")
+            } else {
+                return fmt.Errorf("存在多个多仓：%v。决策未指定币种，无法确定平仓目标", longSyms)
+            }
+        }
+        decision.Symbol = sym
+    }
+
     // 获取当前价格（即使在 DryRun/未执行时也补齐记录字段）
     marketData, err := market.Get(decision.Symbol)
     if err != nil {
@@ -1207,6 +1682,34 @@ func (at *AutoTrader) executeCloseLongWithRecord(decision *decision.Decision, ac
 
 // executeCloseShortWithRecord 执行平空仓并记录详细信息
 func (at *AutoTrader) executeCloseShortWithRecord(decision *decision.Decision, actionRecord *logger.DecisionAction) error {
+    // 先确保 symbol 有效；如果未指定或格式不正确，则根据当前持仓回退推断
+    {
+        sym := strings.TrimSpace(decision.Symbol)
+        up := strings.ToUpper(sym)
+        if sym == "" || up == "USDT" || up == "OKXUSDT" || !strings.HasSuffix(up, "USDT") {
+            positions, perr := at.trader.GetPositions()
+            if perr != nil {
+                return fmt.Errorf("决策未指定有效币种，且获取持仓失败: %v", perr)
+            }
+            var shortSyms []string
+            for _, p := range positions {
+                if ps, ok := p["side"].(string); ok && ps == "short" {
+                    if s, ok := p["symbol"].(string); ok && s != "" {
+                        shortSyms = append(shortSyms, s)
+                    }
+                }
+            }
+            if len(shortSyms) == 1 {
+                sym = shortSyms[0]
+            } else if len(shortSyms) == 0 {
+                return fmt.Errorf("未找到可平的空仓（无 short 仓位），且决策未指定有效币种")
+            } else {
+                return fmt.Errorf("存在多个空仓：%v。决策未指定币种，无法确定平仓目标", shortSyms)
+            }
+        }
+        decision.Symbol = sym
+    }
+
     // 获取当前价格（即使在 DryRun/未执行时也补齐记录字段）
     marketData, err := market.Get(decision.Symbol)
     if err != nil {
@@ -1525,36 +2028,7 @@ func (at *AutoTrader) RunAiCloseThenOpen() (map[string]interface{}, error) {
 func (at *AutoTrader) GetAccountInfo() (map[string]interface{}, error) {
     // 在获取账户前同步交易所入金/出金为投资调整（节流控制）
     at.syncInvestmentsFromExchange()
-    // DryRun 优先：直接使用初始余额作为账户状态，避免依赖私有接口
-    if at.config.DryRun {
-        totalWalletBalance := at.initialBalance
-        availableBalance := at.initialBalance
-        totalUnrealizedProfit := 0.0
-
-        totalEquity := totalWalletBalance + totalUnrealizedProfit
-        invested := at.investedBaseline()
-        totalPnL := totalEquity - invested
-        totalPnLPct := 0.0
-        if invested > 0 {
-            totalPnLPct = (totalPnL / invested) * 100
-        }
-
-        return map[string]interface{}{
-            "total_equity":         totalEquity,
-            "wallet_balance":       totalWalletBalance,
-            "unrealized_profit":    totalUnrealizedProfit,
-            "available_balance":    availableBalance,
-            "total_pnl":            totalPnL,
-            "total_pnl_pct":        totalPnLPct,
-            "total_unrealized_pnl": 0.0,
-            "initial_balance":      at.initialBalance,
-            "invested_amount":      invested,
-            "daily_pnl":            at.dailyPnL,
-            "position_count":       0,
-            "margin_used":          0.0,
-            "margin_used_pct":      0.0,
-        }, nil
-    }
+    // DryRun 时不再直接返回0值，而是尽量读取真实数据，失败则回退到初始余额
 
     balance, err := at.trader.GetBalance()
     if err != nil {
@@ -1709,14 +2183,12 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 			leverage = int(lev)
 		}
 
-		pnlPct := 0.0
-		if side == "long" {
-			pnlPct = ((markPrice - entryPrice) / entryPrice) * 100
-		} else {
-			pnlPct = ((entryPrice - markPrice) / entryPrice) * 100
-		}
-
-		marginUsed := (quantity * markPrice) / float64(leverage)
+        // 按保证金计算盈亏百分比
+        marginUsed := (quantity * markPrice) / float64(leverage)
+        pnlPct := 0.0
+        if marginUsed > 0 {
+            pnlPct = (unrealizedPnl / marginUsed) * 100
+        }
 
 		result = append(result, map[string]interface{}{
 			"symbol":             symbol,
@@ -1727,6 +2199,7 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 			"leverage":           leverage,
 			"unrealized_pnl":     unrealizedPnl,
 			"unrealized_pnl_pct": pnlPct,
+			"unrealized_pnl_pct_margin": pnlPct,
 			"liquidation_price":  liquidationPrice,
 			"margin_used":        marginUsed,
 		})

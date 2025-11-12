@@ -272,14 +272,31 @@ func buildUserPrompt(ctx *Context) string {
 			solData.CurrentMACD, solData.CurrentRSI7))
 	}
 
-	// 账户
-	sb.WriteString(fmt.Sprintf("**账户**: 净值%.2f | 余额%.2f (%.1f%%) | 盈亏%+.2f%% | 保证金%.1f%% | 持仓%d个\n\n",
-		ctx.Account.TotalEquity,
-		ctx.Account.AvailableBalance,
-		(ctx.Account.AvailableBalance/ctx.Account.TotalEquity)*100,
-		ctx.Account.TotalPnLPct,
-		ctx.Account.MarginUsedPct,
-		ctx.Account.PositionCount))
+    // 账户
+    sb.WriteString(fmt.Sprintf("**账户**: 净值%.2f | 余额%.2f (%.1f%%) | 盈亏%+.2f%% | 保证金%.1f%% | 持仓%d个\n",
+        ctx.Account.TotalEquity,
+        ctx.Account.AvailableBalance,
+        (ctx.Account.AvailableBalance/ctx.Account.TotalEquity)*100,
+        ctx.Account.TotalPnLPct,
+        ctx.Account.MarginUsedPct,
+        ctx.Account.PositionCount))
+
+    // 聚合当前持仓保证金盈亏百分比（sum(PnL)/sum(MarginUsed)）
+    if len(ctx.Positions) > 0 {
+        sumPnl := 0.0
+        sumMargin := 0.0
+        for _, p := range ctx.Positions {
+            sumPnl += p.UnrealizedPnL
+            sumMargin += p.MarginUsed
+        }
+        aggPct := 0.0
+        if sumMargin > 0 {
+            aggPct = (sumPnl / sumMargin) * 100
+        }
+        sb.WriteString(fmt.Sprintf("**持仓盈亏（保证金）**: %+.2f%%\n\n", aggPct))
+    } else {
+        sb.WriteString("\n")
+    }
 
 	// 持仓（完整市场数据）
 	if len(ctx.Positions) > 0 {
@@ -299,10 +316,10 @@ func buildUserPrompt(ctx *Context) string {
 				}
 			}
 
-			sb.WriteString(fmt.Sprintf("%d. %s %s | 入场价%.4f 当前价%.4f | 盈亏%+.2f%% | 杠杆%dx | 保证金%.0f | 强平价%.4f%s\n\n",
-				i+1, pos.Symbol, strings.ToUpper(pos.Side),
-				pos.EntryPrice, pos.MarkPrice, pos.UnrealizedPnLPct,
-				pos.Leverage, pos.MarginUsed, pos.LiquidationPrice, holdingDuration))
+            sb.WriteString(fmt.Sprintf("%d. %s %s | 入场价%.4f 当前价%.4f | 盈亏%+.2f%%(保证金) | 杠杆%dx | 保证金%.0f | 强平价%.4f%s\n\n",
+                i+1, pos.Symbol, strings.ToUpper(pos.Side),
+                pos.EntryPrice, pos.MarkPrice, pos.UnrealizedPnLPct,
+                pos.Leverage, pos.MarginUsed, pos.LiquidationPrice, holdingDuration))
 
 			// 使用FormatMarketData输出完整市场数据
 			if marketData, ok := ctx.MarketDataMap[pos.Symbol]; ok {
@@ -798,7 +815,7 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 	}
 
 	// 开仓操作必须提供完整参数
-	if d.Action == "open_long" || d.Action == "open_short" {
+    if d.Action == "open_long" || d.Action == "open_short" {
 		// 根据币种使用配置的杠杆上限
 		maxLeverage := altcoinLeverage          // 山寨币使用配置的杠杆
 		maxPositionValue := accountEquity * 1.5 // 山寨币最多1.5倍账户净值
@@ -835,12 +852,22 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 			}
 		}
 
-		// 验证风险回报比（必须≥1:2.6）
-		// 使用实时市场价格作为入场价，避免固定比例导致RR恒定为4的问题
-		marketData, err := market.Get(d.Symbol)
-		if err != nil {
-			return fmt.Errorf("获取市场价格失败(%s): %v", d.Symbol, err)
-		}
+        // 验证风险回报比（必须≥1:2.6）
+        // 使用实时市场价格作为入场价，避免固定比例导致RR恒定为4的问题
+        // 规范化并校验币种：允许简写如 BTC，统一归一化为 BTCUSDT
+        rawSym := strings.TrimSpace(d.Symbol)
+        normSym := market.Normalize(rawSym)
+        up := strings.ToUpper(normSym)
+        if rawSym == "" || up == "USDT" || up == "OKXUSDT" {
+            return fmt.Errorf("无效币种: '%s' (需形如 BTCUSDT)", d.Symbol)
+        }
+        // 将规范化后的符号写回，保证后续流程一致使用USDT交易对
+        d.Symbol = normSym
+
+        marketData, err := market.Get(normSym)
+        if err != nil {
+            return fmt.Errorf("获取市场价格失败(%s): %v", d.Symbol, err)
+        }
 		entryPrice := marketData.CurrentPrice
 		if entryPrice <= 0 {
 			return fmt.Errorf("无效入场价(%.6f)，无法计算风险回报比", entryPrice)
@@ -866,6 +893,13 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
             return fmt.Errorf("风险回报比过低(%.2f:1)，必须≥%.2f:1 [风险:%.2f%% 收益:%.2f%%] [入场:%.2f 止损:%.2f 止盈:%.2f]",
                 riskRewardRatio, minRiskRewardRatio, riskPercent, rewardPercent, entryPrice, d.StopLoss, d.TakeProfit)
         }
+    }
+
+    // 平仓动作允许未指定或格式不正确的币种：在执行阶段回退根据当前持仓推断
+    // 这样可以容忍AI在平仓时省略符号（例如“close_long”表示平掉当前所有多仓或唯一多仓）
+    if d.Action == "close_long" || d.Action == "close_short" {
+        d.Symbol = strings.TrimSpace(d.Symbol)
+        // 保留容错：若为空或不合法，不在解析阶段报错，交由执行阶段推断具体币种
     }
 
     return nil
