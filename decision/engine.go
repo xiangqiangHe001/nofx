@@ -96,6 +96,9 @@ type FullDecision struct {
 // GetFullDecision 获取AI的完整交易决策（批量分析所有币种和持仓）
 // 保留原接口：继续使用包级默认客户端（兼容旧调用）
 func GetFullDecision(ctx *Context) (*FullDecision, error) {
+    if _, err := market.Get("BTCUSDT"); err != nil {
+        return nil, fmt.Errorf("network precheck failed: %v", err)
+    }
     // 1. 为所有币种获取市场数据
     if err := fetchMarketDataForContext(ctx); err != nil {
         return nil, fmt.Errorf("failed to fetch market data: %w", err)
@@ -128,6 +131,9 @@ func GetFullDecision(ctx *Context) (*FullDecision, error) {
 
 // GetFullDecisionWithClient 使用指定的AI客户端获取完整交易决策（推荐，避免全局冲突）
 func GetFullDecisionWithClient(client *mcp.Client, ctx *Context) (*FullDecision, error) {
+    if _, err := market.Get("BTCUSDT"); err != nil {
+        return nil, fmt.Errorf("network precheck failed: %v", err)
+    }
     // 1. 为所有币种获取市场数据
     if err := fetchMarketDataForContext(ctx); err != nil {
         return nil, fmt.Errorf("failed to fetch market data: %w", err)
@@ -355,19 +361,29 @@ func buildUserPrompt(ctx *Context) string {
 	}
 	sb.WriteString("\n")
 
-	// 夏普比率（直接传值，不要复杂格式化）
-	if ctx.Performance != nil {
-		// 直接从interface{}中提取SharpeRatio
-		type PerformanceData struct {
-			SharpeRatio float64 `json:"sharpe_ratio"`
-		}
-		var perfData PerformanceData
-		if jsonData, err := json.Marshal(ctx.Performance); err == nil {
-			if err := json.Unmarshal(jsonData, &perfData); err == nil {
-				sb.WriteString(fmt.Sprintf("## 📊 夏普比率: %.2f\n\n", perfData.SharpeRatio))
-			}
-		}
-	}
+    // 夏普比率（直接传值，不要复杂格式化）
+    if ctx.Performance != nil {
+        // 直接从interface{}中提取SharpeRatio
+        type PerformanceData struct {
+            SharpeRatio float64 `json:"sharpe_ratio"`
+        }
+        var perfData PerformanceData
+        if jsonData, err := json.Marshal(ctx.Performance); err == nil {
+            if err := json.Unmarshal(jsonData, &perfData); err == nil {
+                sb.WriteString(fmt.Sprintf("## 📊 夏普比率: %.2f\n\n", perfData.SharpeRatio))
+            }
+        }
+    }
+
+    sb.WriteString("请严格按照以下结构先输出思维链分段，然后仅输出 JSON 决策数组（置于代码块围栏内）：\r\n\r\n")
+    sb.WriteString("【观今日市势】\r\n")
+    sb.WriteString("【维科夫周期判断】\r\n")
+    sb.WriteString("【斐波那契分析】\r\n")
+    sb.WriteString("【多周期一致性（3m/15m/1h/4h）】\r\n")
+    sb.WriteString("【风险控制检查】\r\n")
+    sb.WriteString("【持仓检查】\r\n")
+    sb.WriteString("【决策】\r\n\r\n")
+    sb.WriteString("输出要求：\r\n- 仅允许动作：\"open_long\", \"open_short\", \"close_long\", \"close_short\", \"hold\", \"wait\"。\r\n- 当动作为 \"open_long\" 或 \"open_short\" 时必须给出：\r\n  - \"position_size_usd\"（正数）\r\n  - \"leverage\"（正数）\r\n  - \"stop_loss\"（同一计量单位）\r\n  - \"take_profit\"（同一计量单位）\r\n- 所有动作均需：\r\n  - \"confidence\"（0–1）\r\n  - \"risk_usd\"（美元）\r\n\r\n仅在上述思维链分段之后，输出纯 JSON 数组，不得混入任何额外文本。")
 
     sb.WriteString(prompt.UserPromptFooter(activePromptVariant()))
 
@@ -387,8 +403,8 @@ func activePromptVariant() string {
 
 // parseFullDecisionResponse 解析AI的完整决策响应
 func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthLeverage, altcoinLeverage int, minRiskRewardRatio float64) (*FullDecision, error) {
-	// 1. 提取思维链
-	cotTrace := extractCoTTrace(aiResponse)
+    // 1. 提取思维链
+    cotTrace := extractCoTTrace(aiResponse)
 
 	// 2. 提取JSON决策列表
 	decisions, err := extractDecisions(aiResponse)
@@ -399,13 +415,26 @@ func parseFullDecisionResponse(aiResponse string, accountEquity float64, btcEthL
 		}, fmt.Errorf("提取决策失败: %w\n\n=== AI思维链分析 ===\n%s", err, cotTrace)
 	}
 
-	// 3. 验证决策
+    // 3. CoT 合规性检查，不合规则回退为观望
+    required := []string{"【观今日市势】", "【维科夫周期判断】", "【斐波那契分析】", "【多周期一致性", "【风险控制检查】", "【持仓检查】", "【决策】"}
+    compliant := true
+    for _, k := range required {
+        if !strings.Contains(cotTrace, k) {
+            compliant = false
+            break
+        }
+    }
+    if !compliant {
+        decisions = []Decision{{Symbol: "BTCUSDT", Action: "wait", Confidence: 0.5, Reasoning: "CoT不合规，回退为观望"}}
+    }
+
+    // 4. 验证决策
     if err := validateDecisions(decisions, accountEquity, btcEthLeverage, altcoinLeverage, minRiskRewardRatio); err != nil {
-		return &FullDecision{
-			CoTTrace:  cotTrace,
-			Decisions: decisions,
-		}, fmt.Errorf("决策验证失败: %w\n\n=== AI思维链分析 ===\n%s", err, cotTrace)
-	}
+        return &FullDecision{
+            CoTTrace:  cotTrace,
+            Decisions: decisions,
+        }, fmt.Errorf("决策验证失败: %w\n\n=== AI思维链分析 ===\n%s", err, cotTrace)
+    }
 
 	return &FullDecision{
 		CoTTrace:  cotTrace,
@@ -824,9 +853,12 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 			maxPositionValue = accountEquity * 10 // BTC/ETH最多10倍账户净值
 		}
 
-		if d.Leverage <= 0 || d.Leverage > maxLeverage {
-			return fmt.Errorf("杠杆必须在1-%d之间（%s，当前配置上限%d倍）: %d", maxLeverage, d.Symbol, maxLeverage, d.Leverage)
-		}
+        if d.Leverage <= 0 {
+            d.Leverage = 1
+        }
+        if d.Leverage > maxLeverage {
+            d.Leverage = maxLeverage
+        }
 		if d.PositionSizeUSD <= 0 {
 			return fmt.Errorf("仓位大小必须大于0: %.2f", d.PositionSizeUSD)
 		}

@@ -256,12 +256,33 @@ func (s *Server) handleDebugConfig(c *gin.Context) {
     mgrIDs := s.traderManager.GetTraderIDs()
     mgrCount := len(mgrIDs)
 
+    // 追加详细字段：各Trader的扫描间隔（配置与运行态）
+    detailCfg := make([]map[string]interface{}, 0)
+    if s.cfg != nil {
+        for _, t := range s.cfg.Traders {
+            detailCfg = append(detailCfg, map[string]interface{}{
+                "trader_id": t.ID,
+                "scan_interval_minutes": t.ScanIntervalMinutes,
+            })
+        }
+    }
+    detailMgr := make([]map[string]interface{}, 0)
+    for id, t := range s.traderManager.GetAllTraders() {
+        st := t.GetStatus()
+        detailMgr = append(detailMgr, map[string]interface{}{
+            "trader_id": id,
+            "scan_interval_minutes_effective": st["scan_interval_minutes"],
+        })
+    }
+
     c.JSON(http.StatusOK, gin.H{
         "config_loaded_file":   func() string { if s.cfg != nil { return s.cfg.LoadedFile } else { return "" } }(),
         "trader_count_in_config": cfgCount,
         "trader_ids_in_config":   cfgIDs,
         "trader_count_in_manager": mgrCount,
         "trader_ids_in_manager":   mgrIDs,
+        "traders_detail_in_config": detailCfg,
+        "traders_detail_in_manager": detailMgr,
     })
 }
 

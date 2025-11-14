@@ -33,12 +33,8 @@ if (-not $RepoUrl -and -not $ProxyClear) {
         $RepoUrl = $env:NOFX_REPO_URL
         Write-Host "Using env NOFX_REPO_URL as RepoUrl: $RepoUrl" -ForegroundColor Yellow
     } else {
-        Write-Host "RepoUrl not provided and no origin/env found." -ForegroundColor Red
-        $RepoUrl = Read-Host "Enter Repo URL (e.g., https://github.com/user/repo.git)"
-        if (-not $RepoUrl -or $RepoUrl.Trim() -eq '') {
-            Write-Error "RepoUrl is required to push. Aborting."
-            exit 1
-        }
+        $RepoUrl = "https://github.com/xiangqiangHe001/nofx.git"
+        Write-Host "Using default RepoUrl: $RepoUrl" -ForegroundColor Yellow
     }
 }
 
@@ -74,8 +70,8 @@ Write-Verbose "Previous proxies selected ($scopeName): http=$prevHttpProxy https
 if ($EnableProxy -and $Proxy) {
     Write-Host "Apply git proxy ($scopeName): $Proxy" -ForegroundColor Yellow
     Write-Verbose "Applying proxies ($scopeName) via git config"
-    & git config @scopeArgs http.proxy $Proxy
-    & git config @scopeArgs https.proxy $Proxy
+    & git config $scopeArgs http.proxy $Proxy
+    & git config $scopeArgs https.proxy $Proxy
     $proxyWasApplied = $true
 }
 
@@ -83,8 +79,8 @@ if ($EnableProxy -and $Proxy) {
 if ($ProxyClear) {
     Write-Host "Clearing git proxy ($scopeName)" -ForegroundColor Yellow
     Write-Verbose "Unsetting http.proxy and https.proxy ($scopeName)"
-    & git config @scopeArgs --unset http.proxy
-    & git config @scopeArgs --unset https.proxy
+    & git config $scopeArgs --unset http.proxy
+    & git config $scopeArgs --unset https.proxy
     Write-Host "Proxy cleared ($scopeName)" -ForegroundColor Green
     exit 0
 }
@@ -151,12 +147,12 @@ if (-not $status) {
 $pushArgs = @('push','-u','origin',$Branch)
 if ($Force) { $pushArgs += '--force-with-lease' }
 Write-Verbose "Push args: $pushArgs"
-& git @pushArgs
+& git $pushArgs
 
 # Restore proxy (safe)
 if ($proxyWasApplied) {
-    if ($prevHttpProxy) { & git config @scopeArgs http.proxy $prevHttpProxy } else { & git config @scopeArgs --unset http.proxy }
-    if ($prevHttpsProxy) { & git config @scopeArgs https.proxy $prevHttpsProxy } else { & git config @scopeArgs --unset https.proxy }
+    if ($prevHttpProxy) { & git config $scopeArgs http.proxy $prevHttpProxy } else { & git config $scopeArgs --unset http.proxy }
+    if ($prevHttpsProxy) { & git config $scopeArgs https.proxy $prevHttpsProxy } else { & git config $scopeArgs --unset https.proxy }
     Write-Host "Proxy settings restored ($scopeName)" -ForegroundColor Yellow
     Write-Verbose "Restored proxies ($scopeName): http=$prevHttpProxy https=$prevHttpsProxy"
 }

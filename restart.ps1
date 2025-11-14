@@ -16,10 +16,16 @@ try {
     cmd /c chcp 65001 > $null 2>&1
 } catch {}
 
+# 统一确定脚本根目录（兼容某些环境下 $PSScriptRoot/PSCommandPath 为空）
+$scriptPath = $PSCommandPath
+if ([string]::IsNullOrWhiteSpace($scriptPath)) { $scriptPath = $MyInvocation.MyCommand.Path }
+if ([string]::IsNullOrWhiteSpace($scriptPath)) { $scriptPath = (Join-Path (Get-Location).Path 'restart.ps1') }
+$BaseDir = Split-Path -Parent $scriptPath
+
 # 若未提供 ConfigPath，自动选择最新配置路径：优先 trade\config.json，其次根目录 config.json
 if (-not $ConfigPath -or $ConfigPath.Trim() -eq '') {
-    $preferred = Join-Path $PSScriptRoot 'trade\config.json'
-    $fallback  = Join-Path $PSScriptRoot 'config.json'
+    $preferred = Join-Path $BaseDir 'trade\config.json'
+    $fallback  = Join-Path $BaseDir 'config.json'
     if (Test-Path -LiteralPath $preferred) {
         $ConfigPath = $preferred
         Write-Host "Using config: $ConfigPath" -ForegroundColor Yellow
@@ -33,20 +39,22 @@ if (-not $ConfigPath -or $ConfigPath.Trim() -eq '') {
 }
 
 # 固定提示词变体与绝对路径校验（确保始终使用 D:\TRAE\projerct\prompt\system_zhugefan.txt 与 user_zhugefan.txt）
-$PromptSystemPath = Join-Path $PSScriptRoot 'prompt\system_zhugefan.txt'
-$PromptUserPath   = Join-Path $PSScriptRoot 'prompt\user_zhugefan.txt'
-if (-not (Test-Path -LiteralPath $PromptSystemPath)) {
+$PromptSystemPath = Join-Path $BaseDir 'prompt\system_zhugefan.txt'
+$PromptUserPath   = Join-Path $BaseDir 'prompt\user_zhugefan.txt'
+if ([string]::IsNullOrWhiteSpace($PromptSystemPath)) { $PromptSystemPath = Join-Path (Get-Location).Path 'prompt\system_zhugefan.txt' }
+if ([string]::IsNullOrWhiteSpace($PromptUserPath)) { $PromptUserPath = Join-Path (Get-Location).Path 'prompt\user_zhugefan.txt' }
+if ([string]::IsNullOrWhiteSpace($PromptSystemPath) -or -not (Test-Path -LiteralPath $PromptSystemPath)) {
     Write-Host "Prompt system file missing: $PromptSystemPath" -ForegroundColor Red
     throw "Missing prompt system_zhugefan.txt"
 }
-if (-not (Test-Path -LiteralPath $PromptUserPath)) {
+if ([string]::IsNullOrWhiteSpace($PromptUserPath) -or -not (Test-Path -LiteralPath $PromptUserPath)) {
     Write-Host "Prompt user file missing: $PromptUserPath" -ForegroundColor Red
     throw "Missing prompt user_zhugefan.txt"
 }
 Write-Host "Using prompt system: $PromptSystemPath" -ForegroundColor Yellow
 Write-Host "Using prompt user:   $PromptUserPath" -ForegroundColor Yellow
 
-$webDir = Join-Path $PSScriptRoot 'web'
+$webDir = Join-Path $BaseDir 'web'
 
 function Resolve-ScanMinutes {
     param(
@@ -64,8 +72,12 @@ function Resolve-ScanMinutes {
         $rawJson = Get-Content -LiteralPath $ConfigPath -Raw
         if ($rawJson) {
             $cfgObj = $rawJson | ConvertFrom-Json
+            if ($cfgObj -and ($cfgObj.scan_interval_minutes -as [int]) -gt 0) {
+                return [int]$cfgObj.scan_interval_minutes
+            }
             if ($cfgObj -and $cfgObj.traders -and $cfgObj.traders.Count -gt 0) {
-                return [int]$cfgObj.traders[0].scan_interval_minutes
+                $val = [int]$cfgObj.traders[0].scan_interval_minutes
+                if ($val -gt 0) { return $val }
             }
         }
     }
@@ -103,7 +115,7 @@ function Stop-ServiceByPort {
 
 function Stop-ProjectRelatedProcesses {
     try {
-        $projPath = [Regex]::Escape($PSScriptRoot)
+        $projPath = [Regex]::Escape($BaseDir)
         $list = Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -match $projPath -and ($_.CommandLine -match 'vite|npm run dev|node|go run \.|go-build') }
         foreach ($item in $list) {
             try {
@@ -139,7 +151,7 @@ Stop-ProjectRelatedProcesses
 # 2) 启动后端
 Write-Host "== Step 2: Start backend ==" -ForegroundColor Cyan
 
-# 解析 scan_interval_minutes 并导出环境变量，确保后端按最新配置生效
+# 解析 scan_interval_minutes 并导出到子进程环境，确保后端按最新配置生效
 $scanMinutes = Resolve-ScanMinutes -Override $ScanMinutesOverride -ConfigPath $ConfigPath
 if ($scanMinutes -and $scanMinutes -gt 0) {
     Write-Host "Resolved scan_interval_minutes=$scanMinutes (export to env)" -ForegroundColor Yellow
@@ -148,7 +160,7 @@ if ($scanMinutes -and $scanMinutes -gt 0) {
     Write-Host "No valid scan_interval_minutes; skip env override" -ForegroundColor DarkYellow
 }
 
-$backendCmd = "Set-Item env:API_PORT $ApiPort; Set-Item env:NOFX_PROMPT_VARIANT '$PromptVariant'; cd '$PSScriptRoot'; go run . '$ConfigPath'"
+$backendCmd = "Set-Item env:API_PORT $ApiPort; Set-Item env:NOFX_PROMPT_VARIANT '$PromptVariant'; cd '$BaseDir'; go run . '$ConfigPath'"
 Write-Host "Backend command: $backendCmd" -ForegroundColor Green
 $backendProc = Start-Process -FilePath "powershell" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command $backendCmd" -WorkingDirectory $PSScriptRoot -PassThru
 Write-Host "Backend started, PID=$($backendProc.Id). Waiting health check..." -ForegroundColor Green
