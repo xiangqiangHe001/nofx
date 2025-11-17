@@ -7,7 +7,8 @@ param(
     [string]$Proxy,
     [switch]$EnableProxy,
     [switch]$GlobalProxy,
-    [switch]$ProxyClear
+    [switch]$ProxyClear,
+    [string]$Token
 )
 
 # Console encoding init (for click-to-run robustness)
@@ -36,6 +37,10 @@ if (-not $RepoUrl -and -not $ProxyClear) {
         $RepoUrl = "https://github.com/xiangqiangHe001/nofx.git"
         Write-Host "Using default RepoUrl: $RepoUrl" -ForegroundColor Yellow
     }
+}
+
+if (-not $Token -and $env:NOFX_GITHUB_PAT) {
+    $Token = $env:NOFX_GITHUB_PAT
 }
 
 Write-Host "Starting upload to repo: $RepoUrl (branch: $Branch)" -ForegroundColor Cyan
@@ -143,11 +148,39 @@ if (-not $status) {
     Write-Verbose "Working tree clean"
 }
 
-# Push
+# Push（优先使用Token，无需凭据管理器）
 $pushArgs = @('push','-u','origin',$Branch)
 if ($Force) { $pushArgs += '--force-with-lease' }
 Write-Verbose "Push args: $pushArgs"
-& git $pushArgs
+
+if ($Token) {
+    try {
+        $basic = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("x-access-token:$Token"))
+        $header = "Authorization: Basic $basic"
+        & git -c credential.helper= -c "http.extraHeader=$header" $pushArgs
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Push failed with token header. Retrying without extraHeader..." -ForegroundColor Yellow
+            & git -c credential.helper= $pushArgs
+        }
+    } catch {
+        Write-Host "Push exception: $($_.Exception.Message)" -ForegroundColor Red
+        & git -c credential.helper= $pushArgs
+    }
+} else {
+    & git $pushArgs
+    if ($LASTEXITCODE -ne 0) {
+        # 避免 'credential-manager-core' 缺失导致失败
+        $helper = & git config --global --get credential.helper
+        if ($helper -match 'manager-core|manager') {
+            Write-Host "Detected credential.helper=$helper. Temporarily bypassing helper for this push." -ForegroundColor Yellow
+        }
+        & git -c credential.helper= $pushArgs
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "Push failed. 建议：设置环境变量 NOFX_GITHUB_PAT 或使用 -Token 传入 GitHub PAT（scope: repo）。" -ForegroundColor Red
+            Write-Host "示例：在当前会话执行 `$env:NOFX_GITHUB_PAT='ghp_xxx' 后再运行脚本，或直接传入 -Token 参数。" -ForegroundColor Cyan
+        }
+    }
+}
 
 # Restore proxy (safe)
 if ($proxyWasApplied) {
