@@ -23,7 +23,7 @@ func NewTraderManager() *TraderManager {
 }
 
 // AddTrader 娣诲姞涓€涓猼rader
-func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, minRiskRewardRatio float64) error {
+func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, minRiskRewardRatio float64, maxMarginUsagePct float64, cycleWeights config.CycleWeights) error {
     tm.mu.Lock()
     defer tm.mu.Unlock()
 
@@ -68,6 +68,13 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		MaxDrawdown:           maxDrawdown,
         StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
         MinRiskRewardRatio:    minRiskRewardRatio,
+        MaxMarginUsagePct:     maxMarginUsagePct,
+        CycleWeights: struct{ W4h float64; W1h float64; W15m float64; W3m float64 }{
+            W4h:  cycleWeights.Weight4h,
+            W1h:  cycleWeights.Weight1h,
+            W15m: cycleWeights.Weight15m,
+            W3m:  cycleWeights.Weight3m,
+        },
     }
 
     // Debug: 打印当前 trader 的扫描间隔配置与换算后的值

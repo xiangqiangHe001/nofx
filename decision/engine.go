@@ -69,6 +69,11 @@ type Context struct {
 	BTCETHLeverage  int                     `json:"-"` // BTC/ETH杠杆倍数（从配置读取）
     AltcoinLeverage int                     `json:"-"` // 山寨币杠杆倍数（从配置读取）
     MinRiskRewardRatio float64              `json:"-"` // 最小风险回报比（从配置读取）
+    MaxMarginUsagePct  float64              `json:"-"`
+    CycleWeight4h      float64              `json:"-"`
+    CycleWeight1h      float64              `json:"-"`
+    CycleWeight15m     float64              `json:"-"`
+    CycleWeight3m      float64              `json:"-"`
 }
 
 // Decision AI的交易决策
@@ -108,7 +113,7 @@ func GetFullDecision(ctx *Context) (*FullDecision, error) {
     log.Printf("[Prompt] Active variant: %s", activePromptVariant())
 
     // 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
-    systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, ctx.MinRiskRewardRatio)
+    systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, ctx.MinRiskRewardRatio, ctx.MaxMarginUsagePct)
     userPrompt := buildUserPrompt(ctx)
 
 	// 3. 调用AI API（使用 system + user prompt）
@@ -143,7 +148,7 @@ func GetFullDecisionWithClient(client *mcp.Client, ctx *Context) (*FullDecision,
     log.Printf("[Prompt] Active variant: %s", activePromptVariant())
 
     // 2. 构建 System Prompt（固定规则）和 User Prompt（动态数据）
-    systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, ctx.MinRiskRewardRatio)
+    systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, ctx.MinRiskRewardRatio, ctx.MaxMarginUsagePct)
     userPrompt := buildUserPrompt(ctx)
 
 	// 3. 调用AI API（使用 system + user prompt）——使用传入client避免defaultClient被其他trader覆盖
@@ -247,8 +252,8 @@ func calculateMaxCandidates(ctx *Context) int {
 }
 
 // buildSystemPrompt 构建 System Prompt（固定规则，可缓存）
-func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage int, minRR float64) string {
-    return prompt.RenderSystemPrompt(activePromptVariant(), accountEquity, btcEthLeverage, altcoinLeverage, minRR)
+func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage int, minRR float64, maxMarginUsagePct float64) string {
+    return prompt.RenderSystemPrompt(activePromptVariant(), accountEquity, btcEthLeverage, altcoinLeverage, minRR, maxMarginUsagePct)
 }
 
 // buildUserPrompt 构建 User Prompt（动态数据）
@@ -259,24 +264,53 @@ func buildUserPrompt(ctx *Context) string {
 	sb.WriteString(fmt.Sprintf("**时间**: %s | **周期**: #%d | **运行**: %d分钟\n\n",
 		ctx.CurrentTime, ctx.CallCount, ctx.RuntimeMinutes))
 
-	// BTC 市场
-	if btcData, hasBTC := ctx.MarketDataMap["BTCUSDT"]; hasBTC {
-		sb.WriteString(fmt.Sprintf("**BTC**: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n\n",
-			btcData.CurrentPrice, btcData.PriceChange1h, btcData.PriceChange4h,
-			btcData.CurrentMACD, btcData.CurrentRSI7))
-	}
-	// ETH 市场
-	if ethData, hasETH := ctx.MarketDataMap["ETHUSDT"]; hasETH {
-		sb.WriteString(fmt.Sprintf("**ETH**: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n\n",
-			ethData.CurrentPrice, ethData.PriceChange1h, ethData.PriceChange4h,
-			ethData.CurrentMACD, ethData.CurrentRSI7))
-	}
-	// SOL 市场
-	if solData, hasSOL := ctx.MarketDataMap["SOLUSDT"]; hasSOL {
-		sb.WriteString(fmt.Sprintf("**SOL**: %.2f (1h: %+.2f%%, 4h: %+.2f%%) | MACD: %.4f | RSI: %.2f\n\n",
-			solData.CurrentPrice, solData.PriceChange1h, solData.PriceChange4h,
-			solData.CurrentMACD, solData.CurrentRSI7))
-	}
+    // BTC/ETH/SOL 多周期技术概览（MACD 与柱状图并列）
+    if btcData, ok := ctx.MarketDataMap["BTCUSDT"]; ok {
+        sb.WriteString(fmt.Sprintf("**BTC 3m**: %.2f (MACD: %.4f | Hist: %+.4f) | **15m**: (MACD: %.4f | Hist: %+.4f) | **1h**: (MACD: %.4f | Hist: %+.4f) | **4h**: (MACD: %.4f | Hist: %+.4f) | RSI(3m): %.2f\n\n",
+            btcData.CurrentPrice,
+            btcData.CurrentMACD3m, btcData.CurrentMACDHistogram3m,
+            btcData.CurrentMACD15m, btcData.CurrentMACDHistogram15m,
+            btcData.CurrentMACD1h, btcData.CurrentMACDHistogram1h,
+            btcData.CurrentMACD4h, btcData.CurrentMACDHistogram4h,
+            btcData.CurrentRSI7))
+    }
+    if ethData, ok := ctx.MarketDataMap["ETHUSDT"]; ok {
+        sb.WriteString(fmt.Sprintf("**ETH 3m**: %.2f (MACD: %.4f | Hist: %+.4f) | **15m**: (MACD: %.4f | Hist: %+.4f) | **1h**: (MACD: %.4f | Hist: %+.4f) | **4h**: (MACD: %.4f | Hist: %+.4f) | RSI(3m): %.2f\n\n",
+            ethData.CurrentPrice,
+            ethData.CurrentMACD3m, ethData.CurrentMACDHistogram3m,
+            ethData.CurrentMACD15m, ethData.CurrentMACDHistogram15m,
+            ethData.CurrentMACD1h, ethData.CurrentMACDHistogram1h,
+            ethData.CurrentMACD4h, ethData.CurrentMACDHistogram4h,
+            ethData.CurrentRSI7))
+    }
+    if solData, ok := ctx.MarketDataMap["SOLUSDT"]; ok {
+        sb.WriteString(fmt.Sprintf("**SOL 3m**: %.2f (MACD: %.4f | Hist: %+.4f) | **15m**: (MACD: %.4f | Hist: %+.4f) | **1h**: (MACD: %.4f | Hist: %+.4f) | **4h**: (MACD: %.4f | Hist: %+.4f) | RSI(3m): %.2f\n\n",
+            solData.CurrentPrice,
+            solData.CurrentMACD3m, solData.CurrentMACDHistogram3m,
+            solData.CurrentMACD15m, solData.CurrentMACDHistogram15m,
+            solData.CurrentMACD1h, solData.CurrentMACDHistogram1h,
+            solData.CurrentMACD4h, solData.CurrentMACDHistogram4h,
+            solData.CurrentRSI7))
+    }
+
+    if btcData, ok := ctx.MarketDataMap["BTCUSDT"]; ok {
+        s4 := 0.0
+        if btcData.CurrentMACD4h > 0 { s4 += 0.6 } else if btcData.CurrentMACD4h < 0 { s4 -= 0.6 }
+        if btcData.CurrentMACDHistogram4h > 0 { s4 += 0.4 } else if btcData.CurrentMACDHistogram4h < 0 { s4 -= 0.4 }
+        s1 := 0.0
+        if btcData.CurrentMACD1h > 0 { s1 += 0.6 } else if btcData.CurrentMACD1h < 0 { s1 -= 0.6 }
+        if btcData.CurrentMACDHistogram1h > 0 { s1 += 0.4 } else if btcData.CurrentMACDHistogram1h < 0 { s1 -= 0.4 }
+        s15 := 0.0
+        if btcData.CurrentMACD15m > 0 { s15 += 0.6 } else if btcData.CurrentMACD15m < 0 { s15 -= 0.6 }
+        if btcData.CurrentMACDHistogram15m > 0 { s15 += 0.4 } else if btcData.CurrentMACDHistogram15m < 0 { s15 -= 0.4 }
+        s3 := 0.0
+        if btcData.CurrentMACD3m > 0 { s3 += 0.6 } else if btcData.CurrentMACD3m < 0 { s3 -= 0.6 }
+        if btcData.CurrentMACDHistogram3m > 0 { s3 += 0.4 } else if btcData.CurrentMACDHistogram3m < 0 { s3 -= 0.4 }
+        wc := (s4*ctx.CycleWeight4h + s1*ctx.CycleWeight1h + s15*ctx.CycleWeight15m + s3*ctx.CycleWeight3m) / 100.0
+        conf := (wc + 1.0) / 2.0 * 100.0
+        sb.WriteString(fmt.Sprintf("**周期权重**: 4h:%.0f%% 1h:%.0f%% 15m:%.0f%% 3m:%.0f%% | BTC综合信心: %.0f/100\n\n",
+            ctx.CycleWeight4h, ctx.CycleWeight1h, ctx.CycleWeight15m, ctx.CycleWeight3m, conf))
+    }
 
     // 账户
     sb.WriteString(fmt.Sprintf("**账户**: 净值%.2f | 余额%.2f (%.1f%%) | 盈亏%+.2f%% | 保证金%.1f%% | 持仓%d个\n",
@@ -383,6 +417,7 @@ func buildUserPrompt(ctx *Context) string {
     sb.WriteString("【风险控制检查】\r\n")
     sb.WriteString("【持仓检查】\r\n")
     sb.WriteString("【决策】\r\n\r\n")
+    sb.WriteString("多周期方向枚举已提供（3m/15m/1h/4h：up/down/flat），并含一致性计数；仅在至少三个周期方向一致时考虑开仓，并在【多周期一致性（3m/15m/1h/4h）】段落中明确列出各周期方向与一致性计数。\r\n\r\n")
     sb.WriteString("输出要求：\r\n- 仅允许动作：\"open_long\", \"open_short\", \"close_long\", \"close_short\", \"hold\", \"wait\"。\r\n- 当动作为 \"open_long\" 或 \"open_short\" 时必须给出：\r\n  - \"position_size_usd\"（正数）\r\n  - \"leverage\"（正数）\r\n  - \"stop_loss\"（同一计量单位）\r\n  - \"take_profit\"（同一计量单位）\r\n- 所有动作均需：\r\n  - \"confidence\"（0–1）\r\n  - \"risk_usd\"（美元）\r\n\r\n仅在上述思维链分段之后，输出纯 JSON 数组，不得混入任何额外文本。")
 
     sb.WriteString(prompt.UserPromptFooter(activePromptVariant()))
@@ -921,7 +956,7 @@ func validateDecision(d *Decision, accountEquity float64, btcEthLeverage, altcoi
 		}
 
 		// 硬约束：风险回报比必须≥2.6
-        if riskRewardRatio < minRiskRewardRatio {
+        if riskRewardRatio+1e-9 < minRiskRewardRatio {
             return fmt.Errorf("风险回报比过低(%.2f:1)，必须≥%.2f:1 [风险:%.2f%% 收益:%.2f%%] [入场:%.2f 止损:%.2f 止盈:%.2f]",
                 riskRewardRatio, minRiskRewardRatio, riskPercent, rewardPercent, entryPrice, d.StopLoss, d.TakeProfit)
         }

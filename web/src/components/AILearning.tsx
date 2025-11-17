@@ -58,6 +58,11 @@ export default function AILearning({ traderId }: AILearningProps) {
       refreshInterval: 30000, // 30秒刷新（AI学习分析数据更新频率较低）
       revalidateOnFocus: false,
       dedupingInterval: 20000,
+      errorRetryCount: 2,
+      errorRetryInterval: 8000,
+      onError(err) {
+        console.error('AI Learning performance fetch error:', err);
+      },
     }
   );
 
@@ -83,6 +88,12 @@ export default function AILearning({ traderId }: AILearningProps) {
         </div>
         <div className="text-sm mb-1" style={{ color: '#F0B90B' }}>
           统计数据暂不可用，已回退到最近决策/成交数据以供参考。
+        </div>
+        <div className="text-xs mb-2" style={{ color: '#94A3B8' }}>
+          错误详情：{String((error as any)?.message || error)}
+        </div>
+        <div className="text-xs mb-2" style={{ color: '#94A3B8' }}>
+          排查建议：检查后端 <code>/api/performance</code> 路由与服务状态、网络代理与端口转发、以及前端代理配置。
         </div>
         {latestDecisions && latestDecisions.length > 0 && (
           <div className="mt-2 text-xs" style={{ color: '#94A3B8' }}>

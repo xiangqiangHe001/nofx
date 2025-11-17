@@ -7,6 +7,7 @@ import (
     "math"
     "net/http"
     "net/url"
+    "os"
     "strconv"
     "strings"
     "time"
@@ -14,17 +15,39 @@ import (
 
 // Data 市场数据结构
 type Data struct {
-	Symbol            string
-	CurrentPrice      float64
-	PriceChange1h     float64 // 1小时价格变化百分比
-	PriceChange4h     float64 // 4小时价格变化百分比
-	CurrentEMA20      float64
-	CurrentMACD       float64
-	CurrentRSI7       float64
-	OpenInterest      *OIData
-	FundingRate       float64
-	IntradaySeries    *IntradayData
-	LongerTermContext *LongerTermData
+    Symbol            string
+    CurrentPrice      float64
+    PriceChange1h     float64 // 1小时价格变化百分比
+    PriceChange4h     float64 // 4小时价格变化百分比
+    CurrentEMA20      float64
+    CurrentMACD       float64
+    CurrentMACDHistogram float64
+    // 多周期MACD与柱状图
+    CurrentMACD3m            float64
+    CurrentMACDHistogram3m   float64
+    CurrentMACD15m           float64
+    CurrentMACDHistogram15m  float64
+    CurrentMACD1h            float64
+    CurrentMACDHistogram1h   float64
+    CurrentMACD4h            float64
+    CurrentMACDHistogram4h   float64
+    CurrentRSI7       float64
+    OpenInterest      *OIData
+    FundingRate       float64
+    IntradaySeries    *IntradayData
+    LongerTermContext *LongerTermData
+    Direction3m       string
+    Direction15m      string
+    Direction1h       string
+    Direction4h       string
+    DirectionConsistency int
+    BuySellPressureRatio float64
+    OTEHigh           float64
+    OTELow            float64
+    OTELongLower      float64
+    OTELongUpper      float64
+    OTEShortLower     float64
+    OTEShortUpper     float64
 }
 
 // OIData Open Interest数据
@@ -83,23 +106,42 @@ func Get(symbol string) (*Data, error) {
         return nil, fmt.Errorf("unsupported symbol format: '%s' (must end with USDT)", up)
     }
 
-	// 获取3分钟K线数据 (最近10个)
-    klines3m, err := getKlines(symbol, "3m", 40) // fetch more for indicators
+    klines3m, err := getKlines(symbol, "3m", 80)
     if err != nil {
         return nil, fmt.Errorf("failed to fetch 3-minute klines: %v", err)
     }
 
-	// 获取4小时K线数据 (最近10个)
-    klines4h, err := getKlines(symbol, "4h", 60) // fetch more for indicators
+    klines15m, err := getKlines(symbol, "15m", 120)
+    if err != nil {
+        return nil, fmt.Errorf("failed to fetch 15-minute klines: %v", err)
+    }
+
+    klines1h, err := getKlines(symbol, "1h", 120)
+    if err != nil {
+        return nil, fmt.Errorf("failed to fetch 1-hour klines: %v", err)
+    }
+
+    klines4h, err := getKlines(symbol, "4h", 120)
     if err != nil {
         return nil, fmt.Errorf("failed to fetch 4-hour klines: %v", err)
     }
 
 	// 计算当前指标 (基于3分钟最新数据)
 	currentPrice := klines3m[len(klines3m)-1].Close
-	currentEMA20 := calculateEMA(klines3m, 20)
-	currentMACD := calculateMACD(klines3m)
-	currentRSI7 := calculateRSI(klines3m, 7)
+    currentEMA20 := calculateEMA(klines3m, 20)
+    // 3m
+    macd3m := calculateMACD(klines3m)
+    hist3m := calculateMACDHistogram(klines3m)
+    // 15m
+    macd15m := calculateMACD(klines15m)
+    hist15m := calculateMACDHistogram(klines15m)
+    // 1h
+    macd1h := calculateMACD(klines1h)
+    hist1h := calculateMACDHistogram(klines1h)
+    // 4h
+    macd4h := calculateMACD(klines4h)
+    hist4h := calculateMACDHistogram(klines4h)
+    currentRSI7 := calculateRSI(klines3m, 7)
 
 	// 计算价格变化百分比
 	// 1小时价格变化 = 20个3分钟K线前的价格
@@ -130,25 +172,73 @@ func Get(symbol string) (*Data, error) {
 	// 获取Funding Rate
 	fundingRate, _ := getFundingRate(symbol)
 
-	// 计算日内系列数据
-	intradayData := calculateIntradaySeries(klines3m)
+    intradayData := calculateIntradaySeries(klines3m)
 
-	// 计算长期数据
-	longerTermData := calculateLongerTermData(klines4h)
+    longerTermData := calculateLongerTermData(klines4h)
 
-	return &Data{
-		Symbol:            symbol,
-		CurrentPrice:      currentPrice,
-		PriceChange1h:     priceChange1h,
-		PriceChange4h:     priceChange4h,
-		CurrentEMA20:      currentEMA20,
-		CurrentMACD:       currentMACD,
-		CurrentRSI7:       currentRSI7,
-		OpenInterest:      oiData,
-		FundingRate:       fundingRate,
-		IntradaySeries:    intradayData,
-		LongerTermContext: longerTermData,
-	}, nil
+    direction3m := computeDirectionByEMA(klines3m)
+    direction15m := computeDirectionByEMA(klines15m)
+    direction1h := computeDirectionByEMA(klines1h)
+    direction4h := computeDirectionByEMA(klines4h)
+
+    consistency := 0
+    for _, d := range []string{direction3m, direction15m, direction1h, direction4h} {
+        if d == "up" {
+            consistency++
+        }
+    }
+    if consistency < 2 {
+        c := 0
+        for _, d := range []string{direction3m, direction15m, direction1h, direction4h} {
+            if d == "down" {
+                c++
+            }
+        }
+        consistency = c
+    }
+
+    bsRatio := computeBuySellPressureRatio(klines15m)
+
+    high4h, low4h := recentHighLow(klines4h, 30)
+    oteLongLower := low4h + (high4h-low4h)*0.618
+    oteLongUpper := low4h + (high4h-low4h)*0.705
+    oteShortLower := high4h - (high4h-low4h)*0.705
+    oteShortUpper := high4h - (high4h-low4h)*0.618
+
+    return &Data{
+        Symbol:            symbol,
+        CurrentPrice:      currentPrice,
+        PriceChange1h:     priceChange1h,
+        PriceChange4h:     priceChange4h,
+        CurrentEMA20:      currentEMA20,
+        CurrentMACD:       macd3m,
+        CurrentMACDHistogram: hist3m,
+        CurrentMACD3m:          macd3m,
+        CurrentMACDHistogram3m: hist3m,
+        CurrentMACD15m:         macd15m,
+        CurrentMACDHistogram15m: hist15m,
+        CurrentMACD1h:          macd1h,
+        CurrentMACDHistogram1h: hist1h,
+        CurrentMACD4h:          macd4h,
+        CurrentMACDHistogram4h: hist4h,
+        CurrentRSI7:       currentRSI7,
+        OpenInterest:      oiData,
+        FundingRate:       fundingRate,
+        IntradaySeries:    intradayData,
+        LongerTermContext: longerTermData,
+        Direction3m:       direction3m,
+        Direction15m:      direction15m,
+        Direction1h:       direction1h,
+        Direction4h:       direction4h,
+        DirectionConsistency: consistency,
+        BuySellPressureRatio: bsRatio,
+        OTEHigh:           high4h,
+        OTELow:            low4h,
+        OTELongLower:      oteLongLower,
+        OTELongUpper:      oteLongUpper,
+        OTEShortLower:     oteShortLower,
+        OTEShortUpper:     oteShortUpper,
+    }, nil
 }
 
 // getKlines 优先从Binance获取K线；失败时回退到OKX
@@ -336,6 +426,30 @@ func calculateMACD(klines []Kline) float64 {
 
 	// MACD = EMA12 - EMA26
 	return ema12 - ema26
+}
+
+func calculateMACDHistogram(klines []Kline) float64 {
+    if len(klines) < 26 {
+        return 0
+    }
+    series := make([]float64, 0, len(klines)-25)
+    for i := 25; i < len(klines); i++ {
+        series = append(series, calculateMACD(klines[:i+1]))
+    }
+    if len(series) < 9 {
+        return 0
+    }
+    sum := 0.0
+    for i := 0; i < 9; i++ {
+        sum += series[i]
+    }
+    ema := sum / 9.0
+    m := 2.0 / float64(10)
+    for i := 9; i < len(series); i++ {
+        ema = (series[i]-ema)*m + ema
+    }
+    last := series[len(series)-1]
+    return last - ema
 }
 
 // calculateRSI 计算RSI
@@ -575,10 +689,10 @@ func getFundingRate(symbol string) (float64, error) {
 
 // Format 格式化输出市场数据
 func Format(data *Data) string {
-	var sb strings.Builder
+    var sb strings.Builder
 
-	sb.WriteString(fmt.Sprintf("current_price = %.2f, current_ema20 = %.3f, current_macd = %.3f, current_rsi (7 period) = %.3f\n\n",
-		data.CurrentPrice, data.CurrentEMA20, data.CurrentMACD, data.CurrentRSI7))
+    sb.WriteString(fmt.Sprintf("current_price = %.2f, current_ema20 = %.3f, current_macd = %.3f, current_macd_hist = %.3f, current_rsi (7 period) = %.3f\n\n",
+        data.CurrentPrice, data.CurrentEMA20, data.CurrentMACD, data.CurrentMACDHistogram, data.CurrentRSI7))
 
 	sb.WriteString(fmt.Sprintf("In addition, here is the latest %s open interest and funding rate for perps:\n\n",
 		data.Symbol))
@@ -614,8 +728,8 @@ func Format(data *Data) string {
 		}
 	}
 
-	if data.LongerTermContext != nil {
-		sb.WriteString("Longer‑term context (4‑hour timeframe):\n\n")
+    if data.LongerTermContext != nil {
+        sb.WriteString("Longer‑term context (4‑hour timeframe):\n\n")
 
 		sb.WriteString(fmt.Sprintf("20‑Period EMA: %.3f vs. 50‑Period EMA: %.3f\n\n",
 			data.LongerTermContext.EMA20, data.LongerTermContext.EMA50))
@@ -630,12 +744,24 @@ func Format(data *Data) string {
 			sb.WriteString(fmt.Sprintf("MACD indicators: %s\n\n", formatFloatSlice(data.LongerTermContext.MACDValues)))
 		}
 
-		if len(data.LongerTermContext.RSI14Values) > 0 {
-			sb.WriteString(fmt.Sprintf("RSI indicators (14‑Period): %s\n\n", formatFloatSlice(data.LongerTermContext.RSI14Values)))
-		}
-	}
+        if len(data.LongerTermContext.RSI14Values) > 0 {
+            sb.WriteString(fmt.Sprintf("RSI indicators (14‑Period): %s\n\n", formatFloatSlice(data.LongerTermContext.RSI14Values)))
+        }
+    }
 
-	return sb.String()
+    if data.Direction3m != "" || data.Direction15m != "" || data.Direction1h != "" || data.Direction4h != "" {
+        sb.WriteString(fmt.Sprintf("Directions (3m/15m/1h/4h): %s/%s/%s/%s | Consistency: %d\n\n", data.Direction3m, data.Direction15m, data.Direction1h, data.Direction4h, data.DirectionConsistency))
+    }
+
+    if data.BuySellPressureRatio > 0 {
+        sb.WriteString(fmt.Sprintf("Buy/Sell Pressure Ratio: %.3f\n\n", data.BuySellPressureRatio))
+    }
+
+    if data.OTEHigh > 0 || data.OTELow > 0 {
+        sb.WriteString(fmt.Sprintf("OTE long range: [%.4f, %.4f] | OTE short range: [%.4f, %.4f] (4h swing: high=%.4f low=%.4f)\n\n", data.OTELongLower, data.OTELongUpper, data.OTEShortLower, data.OTEShortUpper, data.OTEHigh, data.OTELow))
+    }
+
+    return sb.String()
 }
 
 // formatFloatSlice 格式化float64切片为字符串
@@ -658,6 +784,85 @@ func Normalize(symbol string) string {
         return s
     }
     return s + "USDT"
+}
+
+func computeDirectionByEMA(klines []Kline) string {
+    if len(klines) < 21 {
+        return "flat"
+    }
+    emaPrev := calculateEMA(append([]Kline{}, klines[:len(klines)-1]...), 20)
+    emaLast := calculateEMA(klines, 20)
+    lastPrice := klines[len(klines)-1].Close
+    if lastPrice <= 0 {
+        lastPrice = 1
+    }
+    slope := emaLast - emaPrev
+    thr := getEmaSlopeThresholdRatio()
+    if slope/lastPrice > thr {
+        return "up"
+    }
+    if (-slope)/lastPrice > thr {
+        return "down"
+    }
+    return "flat"
+}
+
+func getEmaSlopeThresholdRatio() float64 {
+    v := os.Getenv("NOFX_EMA20_SLOPE_THRESHOLD_PCT")
+    if v != "" {
+        if f, err := strconv.ParseFloat(v, 64); err == nil {
+            if f > 0 {
+                return f / 100.0
+            }
+        }
+    }
+    return 0.001
+}
+
+func computeBuySellPressureRatio(klines []Kline) float64 {
+    if len(klines) == 0 {
+        return 0
+    }
+    start := len(klines) - 40
+    if start < 0 {
+        start = 0
+    }
+    var buyV, sellV float64
+    for i := start; i < len(klines); i++ {
+        if klines[i].Close >= klines[i].Open {
+            buyV += klines[i].Volume
+        } else {
+            sellV += klines[i].Volume
+        }
+    }
+    if sellV == 0 {
+        if buyV == 0 {
+            return 0
+        }
+        return 999
+    }
+    return buyV / sellV
+}
+
+func recentHighLow(klines []Kline, lookback int) (float64, float64) {
+    if len(klines) == 0 {
+        return 0, 0
+    }
+    if lookback > len(klines) {
+        lookback = len(klines)
+    }
+    start := len(klines) - lookback
+    high := klines[start].High
+    low := klines[start].Low
+    for i := start; i < len(klines); i++ {
+        if klines[i].High > high {
+            high = klines[i].High
+        }
+        if klines[i].Low < low {
+            low = klines[i].Low
+        }
+    }
+    return high, low
 }
 
 // parseFloat 解析float值

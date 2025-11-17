@@ -10,6 +10,30 @@ import type {
 
 const API_BASE = '/api';
 
+async function fetchWithRetry(url: string, options?: RequestInit, retries = 2, timeoutMs = 10000): Promise<any> {
+  let lastErr: any;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...(options || {}), signal: controller.signal });
+      clearTimeout(timer);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      }
+      return res.json();
+    } catch (err: any) {
+      clearTimeout(timer);
+      lastErr = err;
+      if (attempt < retries) {
+        await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
+        continue;
+      }
+    }
+  }
+  throw lastErr || new Error('请求失败');
+}
+
 export const api = {
   // 竞赛相关接口
   async getCompetition(): Promise<CompetitionData> {
@@ -76,9 +100,7 @@ export const api = {
     const url = traderId
       ? `${API_BASE}/decisions/latest?trader_id=${traderId}`
       : `${API_BASE}/decisions/latest`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('获取最新决策失败');
-    return res.json();
+    return fetchWithRetry(url);
   },
 
   // 获取统计信息（支持trader_id）
@@ -110,9 +132,7 @@ export const api = {
     const url = query
       ? `${API_BASE}/performance?${query}`
       : `${API_BASE}/performance`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error('获取AI学习数据失败');
-    return res.json();
+    return fetchWithRetry(url);
   },
 
   // 获取自动执行开关状态

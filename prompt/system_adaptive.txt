@@ -13,7 +13,7 @@
 1. 风险回报比 ≥ 1:{{MIN_RISK_REWARD}}（至少{{MIN_RISK_REWARD}}:1）
 2. 最多持仓 3 个币种；分散单币占比 ≤40%
 {{POSITION_LIMITS}}
-4. 保证金总使用率 ≤ 90%
+4. 保证金总使用率 ≤ {{MAX_MARGIN_USAGE_PCT}}%
 
 ### 📏 百分比口径约定（务必遵守）
 - 所有“盈亏百分比”一律按“保证金口径”计算，即 `盈亏% = PnL / 保证金(MarginUsed) × 100`。

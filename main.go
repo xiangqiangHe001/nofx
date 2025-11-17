@@ -81,6 +81,8 @@ func main() {
             cfg.StopTradingMinutes,
             cfg.Leverage, // 传递杠杆配置
             cfg.MinRiskRewardRatio, // 传递最小风险回报比
+            cfg.MaxMarginUsagePct,  // 传递保证金使用率上限
+            cfg.CycleWeights,       // 传递周期权重
         )
 		if err != nil {
 			log.Fatalf("❌ 初始化trader失败: %v", err)

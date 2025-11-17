@@ -84,6 +84,46 @@ function Resolve-ScanMinutes {
     return $null
 }
 
+function Resolve-EmaSlopeThresholdPct {
+    param(
+        [string]$ConfigPath
+    )
+    if (Test-Path -LiteralPath $ConfigPath) {
+        $rawJson = Get-Content -LiteralPath $ConfigPath -Raw
+        if ($rawJson) {
+            $cfgObj = $rawJson | ConvertFrom-Json
+            if ($cfgObj -and ($cfgObj.ema20_slope_threshold_pct -as [double]) -gt 0) {
+                return [double]$cfgObj.ema20_slope_threshold_pct
+            }
+            if ($cfgObj -and $cfgObj.traders -and $cfgObj.traders.Count -gt 0) {
+                $v = [double]$cfgObj.traders[0].ema20_slope_threshold_pct
+                if ($v -gt 0) { return $v }
+            }
+        }
+    }
+    return $null
+}
+
+function Resolve-MaxMarginUsagePct {
+    param(
+        [string]$ConfigPath
+    )
+    if (Test-Path -LiteralPath $ConfigPath) {
+        $rawJson = Get-Content -LiteralPath $ConfigPath -Raw
+        if ($rawJson) {
+            $cfgObj = $rawJson | ConvertFrom-Json
+            if ($cfgObj -and ($cfgObj.max_margin_usage_pct -as [double]) -gt 0) {
+                return [double]$cfgObj.max_margin_usage_pct
+            }
+            if ($cfgObj -and $cfgObj.traders -and $cfgObj.traders.Count -gt 0) {
+                $v = [double]$cfgObj.traders[0].max_margin_usage_pct
+                if ($v -gt 0) { return $v }
+            }
+        }
+    }
+    return $null
+}
+
 function Stop-ServiceByPort {
     param(
         [int]$Port
@@ -160,6 +200,18 @@ if ($scanMinutes -and $scanMinutes -gt 0) {
     Write-Host "No valid scan_interval_minutes; skip env override" -ForegroundColor DarkYellow
 }
 
+$emaSlopePct = Resolve-EmaSlopeThresholdPct -ConfigPath $ConfigPath
+if ($emaSlopePct -and $emaSlopePct -gt 0) {
+    Write-Host "Resolved ema20_slope_threshold_pct=$emaSlopePct (export to env)" -ForegroundColor Yellow
+    Set-Item env:NOFX_EMA20_SLOPE_THRESHOLD_PCT $emaSlopePct
+}
+
+$maxMarginPct = Resolve-MaxMarginUsagePct -ConfigPath $ConfigPath
+if ($maxMarginPct -and $maxMarginPct -gt 0) {
+    Write-Host "Resolved max_margin_usage_pct=$maxMarginPct (export to env)" -ForegroundColor Yellow
+    Set-Item env:NOFX_MAX_MARGIN_USAGE_PCT $maxMarginPct
+}
+
 $backendCmd = "Set-Item env:API_PORT $ApiPort; Set-Item env:NOFX_PROMPT_VARIANT '$PromptVariant'; cd '$BaseDir'; go run . '$ConfigPath'"
 Write-Host "Backend command: $backendCmd" -ForegroundColor Green
 $backendProc = Start-Process -FilePath "powershell" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command $backendCmd" -WorkingDirectory $PSScriptRoot -PassThru
@@ -190,12 +242,38 @@ if (-not (Test-Path $webDir)) {
 
     $frontCmd = "cd '$webDir'; npm run dev -- --port $FrontPort"
     Write-Host "Frontend command: $frontCmd" -ForegroundColor Green
-    $frontProc = Start-Process -FilePath "powershell" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command $frontCmd" -WorkingDirectory $webDir -PassThru
-    Write-Host "Frontend started, PID=$($frontProc.Id). Waiting availability..." -ForegroundColor Green
+    if ($InlineRun) {
+        Start-Job -Name "nofx-frontend-$FrontPort" -ScriptBlock {
+            param($dir,$cmd)
+            Set-Location $dir
+            Invoke-Expression $cmd
+        } -ArgumentList $webDir,$frontCmd | Out-Null
+        Write-Host "Frontend started as background job. Waiting availability..." -ForegroundColor Green
+    } else {
+        $frontProc = Start-Process -FilePath "powershell" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command $frontCmd" -WorkingDirectory $webDir -PassThru
+        Write-Host "Frontend started, PID=$($frontProc.Id). Waiting availability..." -ForegroundColor Green
+    }
 
     $frontUrl = "http://localhost:$FrontPort/"
     if (-not (Wait-HttpOk -Url $frontUrl -TimeoutSec 30)) {
         Write-Host "Frontend wait timeout: $frontUrl" -ForegroundColor Yellow
+        Write-Host "Try fallback: build & preview server..." -ForegroundColor Yellow
+        try {
+            Push-Location $webDir
+            npm run build
+            Pop-Location
+        } catch {
+            Write-Host "Build failed: $($_.Exception.Message)" -ForegroundColor Red
+        }
+        $previewCmd = "cd '$webDir'; npm run preview -- --port $FrontPort"
+        Write-Host "Preview command: $previewCmd" -ForegroundColor Green
+        $previewProc = Start-Process -FilePath "powershell" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command $previewCmd" -WorkingDirectory $webDir -PassThru
+        Write-Host "Preview started, PID=$($previewProc.Id). Waiting availability..." -ForegroundColor Green
+        if (-not (Wait-HttpOk -Url $frontUrl -TimeoutSec 30)) {
+            Write-Host "Preview wait timeout: $frontUrl" -ForegroundColor Red
+        } else {
+            Write-Host "Frontend (preview) is ready: $frontUrl" -ForegroundColor Green
+        }
     } else {
         Write-Host "Frontend is ready: $frontUrl" -ForegroundColor Green
     }
@@ -203,6 +281,8 @@ if (-not (Test-Path $webDir)) {
     # 4) 打开页面
     Write-Host "== Step 4: Open page ==" -ForegroundColor Cyan
     try { Start-Process $frontUrl } catch {}
+    Write-Host "Preview URL: $frontUrl" -ForegroundColor Cyan
+    Write-Host "TRAEPREVIEW: $frontUrl" -ForegroundColor Cyan
 }
 
 Write-Host "Done: backend port=$ApiPort, frontend port=$FrontPort" -ForegroundColor Green

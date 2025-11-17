@@ -62,8 +62,16 @@ type TraderConfig struct {
 
 // LeverageConfig 鏉犳潌閰嶇疆
 type LeverageConfig struct {
-	BTCETHLeverage  int `json:"btc_eth_leverage"` // BTC鍜孍TH鐨勬潬鏉嗗€嶆暟锛堜富璐︽埛寤鸿5-50锛屽瓙璐︽埛鈮?锛?
-	AltcoinLeverage int `json:"altcoin_leverage"` // 灞卞甯佺殑鏉犳潌鍊嶆暟锛堜富璐︽埛寤鸿5-20锛屽瓙璐︽埛鈮?锛?
+    BTCETHLeverage  int `json:"btc_eth_leverage"` // BTC鍜孍TH鐨勬潬鏉嗗€嶆暟锛堜富璐︽埛寤鸿5-50锛屽瓙璐︽埛鈮?锛?
+    AltcoinLeverage int `json:"altcoin_leverage"` // 灞卞甯佺殑鏉犳潌鍊嶆暟锛堜富璐︽埛寤鸿5-20锛屽瓙璐︽埛鈮?锛?
+}
+
+// CycleWeights 周期权重（百分比，总和建议为100）
+type CycleWeights struct {
+    Weight4h  float64 `json:"weight_4h"`
+    Weight1h  float64 `json:"weight_1h"`
+    Weight15m float64 `json:"weight_15m"`
+    Weight3m  float64 `json:"weight_3m"`
 }
 
 // Config 鎬婚厤缃?
@@ -79,6 +87,9 @@ type Config struct {
     StopTradingMinutes int            `json:"stop_trading_minutes"`
     // 最小风险回报比（硬性校验阈值），默认2.6；可通过环境变量 NOFX_MIN_RISK_REWARD_RATIO 回退设置（当未在配置文件中指定时）
     MinRiskRewardRatio float64        `json:"min_risk_reward_ratio"`
+    // 保证金总使用率上限（百分比，默认60）。当配置未设置时，允许通过环境变量 NOFX_MAX_MARGIN_USAGE_PCT 回退设置
+    MaxMarginUsagePct  float64        `json:"max_margin_usage_pct"`
+    CycleWeights       CycleWeights   `json:"cycle_weights"`
     Leverage           LeverageConfig `json:"leverage"` // 鏉犳潌閰嶇疆
     // 外部仓库兼容适配总开关与模块级开关（默认全部关闭，保证现有行为不变）
     ExternalCompat     ExternalCompatConfig `json:"external_compat"`
@@ -137,6 +148,35 @@ func LoadConfig(filename string) (*Config, error) {
     }
     if config.MinRiskRewardRatio <= 0 {
         config.MinRiskRewardRatio = 2.6
+    }
+
+    // 设置保证金使用率上限默认值；优先使用配置文件，若未设置则尝试使用环境变量作为回退
+    if config.MaxMarginUsagePct <= 0 {
+        if v := os.Getenv("NOFX_MAX_MARGIN_USAGE_PCT"); v != "" {
+            if mm, err := parseFloatSafe(v); err == nil && mm > 0 {
+                config.MaxMarginUsagePct = mm
+                log.Printf("[Config] Set max_margin_usage_pct from env NOFX_MAX_MARGIN_USAGE_PCT=%.0f", mm)
+            }
+        }
+    }
+    if config.MaxMarginUsagePct <= 0 {
+        config.MaxMarginUsagePct = 60.0
+    }
+
+    // 周期权重默认值与规范化
+    if config.CycleWeights.Weight4h <= 0 && config.CycleWeights.Weight1h <= 0 && config.CycleWeights.Weight15m <= 0 && config.CycleWeights.Weight3m <= 0 {
+        config.CycleWeights = CycleWeights{Weight4h: 40, Weight1h: 30, Weight15m: 20, Weight3m: 10}
+    }
+    sumW := config.CycleWeights.Weight4h + config.CycleWeights.Weight1h + config.CycleWeights.Weight15m + config.CycleWeights.Weight3m
+    if sumW <= 0 {
+        config.CycleWeights = CycleWeights{Weight4h: 40, Weight1h: 30, Weight15m: 20, Weight3m: 10}
+        sumW = 100
+    }
+    if sumW != 100 {
+        config.CycleWeights.Weight4h = (config.CycleWeights.Weight4h / sumW) * 100
+        config.CycleWeights.Weight1h = (config.CycleWeights.Weight1h / sumW) * 100
+        config.CycleWeights.Weight15m = (config.CycleWeights.Weight15m / sumW) * 100
+        config.CycleWeights.Weight3m = (config.CycleWeights.Weight3m / sumW) * 100
     }
 
 	// 璁剧疆榛樿鍊硷細濡傛灉use_default_coins鏈缃紙涓篺alse锛変笖娌℃湁閰嶇疆coin_pool_api_url锛屽垯榛樿浣跨敤榛樿甯佺鍒楄〃

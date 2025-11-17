@@ -157,6 +157,14 @@ type AutoTraderConfig struct {
     DryRun          bool          // 是否 DryRun（演示模式，跳过真实下单）
     // 决策校验阈值
     MinRiskRewardRatio float64 // 最小风险回报比（硬性校验）
+    // 保证金使用率上限（百分比）
+    MaxMarginUsagePct  float64
+    CycleWeights struct {
+        W4h  float64
+        W1h  float64
+        W15m float64
+        W3m  float64
+    }
 }
 
 // AutoTrader 自动交易器
@@ -340,6 +348,8 @@ func (at *AutoTrader) Run() error {
     log.Printf("💰 初始余额: %.2f USDT | 额外投入: %.2f USDT | 总投入: %.2f USDT", at.initialBalance, at.config.ExtraInvestment, at.initialBalance+at.config.ExtraInvestment)
     log.Printf("⚙️  扫描间隔: %v", at.config.ScanInterval)
     log.Printf("🛡️  最小风险回报比: %.2f", at.config.MinRiskRewardRatio)
+    log.Printf("🔧 杠杆上限: BTC/ETH=%dx | 山寨=%dx", at.config.BTCETHLeverage, at.config.AltcoinLeverage)
+    log.Printf("🧯 保证金使用率上限: %.0f%%", at.config.MaxMarginUsagePct)
     // 显示当前启动使用的提示词模板（来自环境变量 NOFX_PROMPT_VARIANT，未设置则回退为默认）
     func() {
         variant := os.Getenv("NOFX_PROMPT_VARIANT")
@@ -505,7 +515,7 @@ func (at *AutoTrader) runCycle() error {
     if strings.TrimSpace(variant) == "" {
         variant = prompt.DefaultVariant
     }
-    fallbackSystemPrompt := prompt.RenderSystemPrompt(variant, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, at.config.MinRiskRewardRatio)
+    fallbackSystemPrompt := prompt.RenderSystemPrompt(variant, ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, at.config.MinRiskRewardRatio, at.config.MaxMarginUsagePct)
 
     log.Printf("Account equity: %.2f USDT | Available: %.2f USDT | Positions: %d",
         ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
@@ -655,15 +665,15 @@ func (at *AutoTrader) runCycle() error {
                 continue
             }
 
-            // 动态调整：在不超过60%保证金上限的前提下，优先提升杠杆至配置值，其次缩小仓位USD
-            // 可用保证金空间（按60%上限）
+            // 动态调整：在不超过配置的保证金上限前提下，优先提升杠杆至配置值，其次缩小仓位USD
+            // 可用保证金空间（按 max_margin_usage_pct 上限）
             if totalEquity <= 0 {
                 log.Printf("⚠️ total_equity<=0，无法计算保证金占用，暂不应用全局预算限制：%s %s", d.Symbol, d.Action)
             } else {
-                maxBudget := 0.60*totalEquity
+                maxBudget := (at.config.MaxMarginUsagePct/100.0)*totalEquity
                 allowedMargin := maxBudget - marginUsed
                 if allowedMargin <= 0 {
-                    msg := fmt.Sprintf("❌ 全局保证金上限已用尽(%.2f%%≥60%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, d.Symbol)
+                    msg := fmt.Sprintf("❌ 全局保证金上限已用尽(%.2f%%≥%.0f%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, at.config.MaxMarginUsagePct, d.Symbol)
                     log.Println(msg)
                     actionRecord.Error = "margin_budget_exhausted"
                     record.ExecutionLog = append(record.ExecutionLog, msg)
@@ -677,32 +687,34 @@ func (at *AutoTrader) runCycle() error {
                 if strings.HasPrefix(symU, "BTC") || strings.HasPrefix(symU, "ETH") {
                     cfgLev = at.config.BTCETHLeverage
                 }
-                // 目标杠杆：若AI建议较低，则提升至配置值；若AI更高则沿用AI值
+                // 目标杠杆：限定在 [1, cfgLev]
                 targetLev := d.Leverage
                 if targetLev <= 0 { targetLev = 1 }
-                if targetLev < cfgLev { targetLev = cfgLev }
+                if targetLev > cfgLev { targetLev = cfgLev }
 
-                // 计算在保持原USD下满足预算所需的杠杆
+                // 计算在保持原USD下满足预算所需的杠杆，并限制不超过配置上限
                 requiredLev := int(math.Ceil(d.PositionSizeUSD / allowedMargin))
                 if requiredLev < 1 { requiredLev = 1 }
                 if requiredLev < targetLev { requiredLev = targetLev }
+                proposedLev := requiredLev
+                if proposedLev > cfgLev { proposedLev = cfgLev }
 
-                // 在所需/目标杠杆下的允许USD
-                allowedUSD := allowedMargin * float64(requiredLev)
+                // 在提议杠杆下的允许USD
+                allowedUSD := allowedMargin * float64(proposedLev)
 
                 if d.PositionSizeUSD > allowedUSD {
                     // 原计划USD超出预算，在提升杠杆至所需后仍不足，则缩仓到允许USD
                     oldUSD := d.PositionSizeUSD
                     oldLev := d.Leverage
-                    d.Leverage = requiredLev
+                    d.Leverage = proposedLev
                     d.PositionSizeUSD = allowedUSD
-                    msg := fmt.Sprintf("⚠️ 预算门控：%s 杠杆 %dx→%dx；仓位 %.2fUSD→%.2fUSD，满足60%%预算", d.Symbol, oldLev, d.Leverage, oldUSD, d.PositionSizeUSD)
+                    msg := fmt.Sprintf("⚠️ 预算门控：%s 杠杆 %dx→%dx；仓位 %.2fUSD→%.2fUSD，满足%.0f%%预算", d.Symbol, oldLev, d.Leverage, oldUSD, d.PositionSizeUSD, at.config.MaxMarginUsagePct)
                     log.Println(msg)
                     record.ExecutionLog = append(record.ExecutionLog, msg)
-                } else if d.Leverage < requiredLev {
+                } else if d.Leverage < proposedLev {
                     // 原计划USD在预算内，但杠杆低于所需/配置，则提升杠杆以更安全地占用预算
                     oldLev := d.Leverage
-                    d.Leverage = requiredLev
+                    d.Leverage = proposedLev
                     msg := fmt.Sprintf("ℹ️ 调整杠杆以满足预算/配置：%s 杠杆 %dx→%dx；保留原USD %.2f", d.Symbol, oldLev, d.Leverage, d.PositionSizeUSD)
                     log.Println(msg)
                     record.ExecutionLog = append(record.ExecutionLog, msg)
@@ -924,6 +936,11 @@ ctx := &decision.Context{
 		CandidateCoins: candidateCoins,
         Performance:    performance, // 添加历史表现分析
         MinRiskRewardRatio: at.config.MinRiskRewardRatio,
+        MaxMarginUsagePct:  at.config.MaxMarginUsagePct,
+        CycleWeight4h:      at.config.CycleWeights.W4h,
+        CycleWeight1h:      at.config.CycleWeights.W1h,
+        CycleWeight15m:     at.config.CycleWeights.W15m,
+        CycleWeight3m:      at.config.CycleWeights.W3m,
 }
 
 	return ctx, nil
@@ -1020,10 +1037,10 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
             if totalEquity <= 0 {
                 log.Printf("⚠️ total_equity<=0，无法计算保证金占用，暂不应用全局预算限制：%s %s", decision.Symbol, decision.Action)
             } else {
-                maxBudget := 0.60*totalEquity
+                maxBudget := (at.config.MaxMarginUsagePct/100.0)*totalEquity
                 allowedMargin := maxBudget - marginUsed
                 if allowedMargin <= 0 {
-                    return fmt.Errorf("❌ 全局保证金上限已用尽(%.2f%%≥60%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, decision.Symbol)
+                    return fmt.Errorf("❌ 全局保证金上限已用尽(%.2f%%≥%.0f%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, at.config.MaxMarginUsagePct, decision.Symbol)
                 }
 
                 symU := strings.ToUpper(decision.Symbol)
@@ -1031,23 +1048,23 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
                 if strings.HasPrefix(symU, "BTC") || strings.HasPrefix(symU, "ETH") { cfgLev = at.config.BTCETHLeverage }
                 targetLev := decision.Leverage
                 if targetLev <= 0 { targetLev = 1 }
-                if targetLev < cfgLev { targetLev = cfgLev }
+                if targetLev > cfgLev { targetLev = cfgLev }
 
                 requiredLev := int(math.Ceil(decision.PositionSizeUSD / allowedMargin))
                 if requiredLev < 1 { requiredLev = 1 }
                 if requiredLev < targetLev { requiredLev = targetLev }
-
-                allowedUSD := allowedMargin * float64(requiredLev)
-
+                proposedLev := requiredLev
+                if proposedLev > cfgLev { proposedLev = cfgLev }
+                allowedUSD := allowedMargin * float64(proposedLev)
                 if decision.PositionSizeUSD > allowedUSD {
                     oldUSD := decision.PositionSizeUSD
                     oldLev := decision.Leverage
-                    decision.Leverage = requiredLev
+                    decision.Leverage = proposedLev
                     decision.PositionSizeUSD = allowedUSD
-                    log.Printf("⚠️ 预算门控：%s 杠杆 %dx→%dx；仓位 %.2fUSD→%.2fUSD，满足60%%预算", decision.Symbol, oldLev, decision.Leverage, oldUSD, decision.PositionSizeUSD)
-                } else if decision.Leverage < requiredLev {
+                    log.Printf("⚠️ 预算门控：%s 杠杆 %dx→%dx；仓位 %.2fUSD→%.2fUSD，满足%.0f%%预算", decision.Symbol, oldLev, decision.Leverage, oldUSD, decision.PositionSizeUSD, at.config.MaxMarginUsagePct)
+                } else if decision.Leverage < proposedLev {
                     oldLev := decision.Leverage
-                    decision.Leverage = requiredLev
+                    decision.Leverage = proposedLev
                     log.Printf("ℹ️ 调整杠杆以满足预算/配置：%s 杠杆 %dx→%dx；保留原USD %.2f", decision.Symbol, oldLev, decision.Leverage, decision.PositionSizeUSD)
                 }
             }
@@ -1169,10 +1186,10 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
             if totalEquity <= 0 {
                 log.Printf("⚠️ total_equity<=0，无法计算保证金占用，暂不应用全局预算限制：%s %s", decision.Symbol, decision.Action)
             } else {
-                maxBudget := 0.60*totalEquity
+                maxBudget := (at.config.MaxMarginUsagePct/100.0)*totalEquity
                 allowedMargin := maxBudget - marginUsed
                 if allowedMargin <= 0 {
-                    return fmt.Errorf("❌ 全局保证金上限已用尽(%.2f%%≥60%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, decision.Symbol)
+                    return fmt.Errorf("❌ 全局保证金上限已用尽(%.2f%%≥%.0f%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, at.config.MaxMarginUsagePct, decision.Symbol)
                 }
 
                 symU := strings.ToUpper(decision.Symbol)
@@ -1180,23 +1197,25 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
                 if strings.HasPrefix(symU, "BTC") || strings.HasPrefix(symU, "ETH") { cfgLev = at.config.BTCETHLeverage }
                 targetLev := decision.Leverage
                 if targetLev <= 0 { targetLev = 1 }
-                if targetLev < cfgLev { targetLev = cfgLev }
+                if targetLev > cfgLev { targetLev = cfgLev }
 
                 requiredLev := int(math.Ceil(decision.PositionSizeUSD / allowedMargin))
                 if requiredLev < 1 { requiredLev = 1 }
                 if requiredLev < targetLev { requiredLev = targetLev }
+                proposedLev := requiredLev
+                if proposedLev > cfgLev { proposedLev = cfgLev }
 
-                allowedUSD := allowedMargin * float64(requiredLev)
+                allowedUSD := allowedMargin * float64(proposedLev)
 
                 if decision.PositionSizeUSD > allowedUSD {
                     oldUSD := decision.PositionSizeUSD
                     oldLev := decision.Leverage
-                    decision.Leverage = requiredLev
+                    decision.Leverage = proposedLev
                     decision.PositionSizeUSD = allowedUSD
-                    log.Printf("⚠️ 预算门控：%s 杠杆 %dx→%dx；仓位 %.2fUSD→%.2fUSD，满足60%%预算", decision.Symbol, oldLev, decision.Leverage, oldUSD, decision.PositionSizeUSD)
-                } else if decision.Leverage < requiredLev {
+                    log.Printf("⚠️ 预算门控：%s 杠杆 %dx→%dx；仓位 %.2fUSD→%.2fUSD，满足%.0f%%预算", decision.Symbol, oldLev, decision.Leverage, oldUSD, decision.PositionSizeUSD, at.config.MaxMarginUsagePct)
+                } else if decision.Leverage < proposedLev {
                     oldLev := decision.Leverage
-                    decision.Leverage = requiredLev
+                    decision.Leverage = proposedLev
                     log.Printf("ℹ️ 调整杠杆以满足预算/配置：%s 杠杆 %dx→%dx；保留原USD %.2f", decision.Symbol, oldLev, decision.Leverage, decision.PositionSizeUSD)
                 }
             }
@@ -1265,6 +1284,13 @@ func (at *AutoTrader) ManualOpenLong(symbol string, usd float64, leverage int) (
     }
     quantity := usd / price
 
+    // 杠杆限制在配置范围
+    symU := strings.ToUpper(symbol)
+    cfgLev := at.config.AltcoinLeverage
+    if strings.HasPrefix(symU, "BTC") || strings.HasPrefix(symU, "ETH") { cfgLev = at.config.BTCETHLeverage }
+    if leverage <= 0 { leverage = 1 }
+    if leverage > cfgLev { leverage = cfgLev }
+
     // 全局预算与持仓上限硬约束
     {
         acct, aerr := at.GetAccountInfo()
@@ -1322,8 +1348,8 @@ func (at *AutoTrader) ManualOpenLong(symbol string, usd float64, leverage int) (
                 log.Printf("⚠️ total_equity<=0，无法计算保证金占用，暂不应用全局预算限制：%s open_long", symbol)
             } else {
                 projectedPct := ((marginUsed + marginNeeded) / totalEquity) * 100
-                if projectedPct > 60.0 {
-                    return nil, fmt.Errorf("❌ 预计保证金使用率将超限(%.2f%%→%.2f%%>60%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, projectedPct, symbol)
+                if projectedPct > at.config.MaxMarginUsagePct {
+                    return nil, fmt.Errorf("❌ 预计保证金使用率将超限(%.2f%%→%.2f%%>%.0f%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, projectedPct, at.config.MaxMarginUsagePct, symbol)
                 }
             }
         }
@@ -1405,6 +1431,13 @@ func (at *AutoTrader) ManualOpenShort(symbol string, usd float64, leverage int) 
     }
     quantity := usd / price
 
+    // 杠杆限制在配置范围
+    symU := strings.ToUpper(symbol)
+    cfgLev := at.config.AltcoinLeverage
+    if strings.HasPrefix(symU, "BTC") || strings.HasPrefix(symU, "ETH") { cfgLev = at.config.BTCETHLeverage }
+    if leverage <= 0 { leverage = 1 }
+    if leverage > cfgLev { leverage = cfgLev }
+
     // 全局预算与持仓上限硬约束
     {
         acct, aerr := at.GetAccountInfo()
@@ -1462,8 +1495,8 @@ func (at *AutoTrader) ManualOpenShort(symbol string, usd float64, leverage int) 
                 log.Printf("⚠️ total_equity<=0，无法计算保证金占用，暂不应用全局预算限制：%s open_short", symbol)
             } else {
                 projectedPct := ((marginUsed + marginNeeded) / totalEquity) * 100
-                if projectedPct > 60.0 {
-                    return nil, fmt.Errorf("❌ 预计保证金使用率将超限(%.2f%%→%.2f%%>60%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, projectedPct, symbol)
+                if projectedPct > at.config.MaxMarginUsagePct {
+                    return nil, fmt.Errorf("❌ 预计保证金使用率将超限(%.2f%%→%.2f%%>%.0f%%)，拒绝开仓 %s", (marginUsed/totalEquity)*100, projectedPct, at.config.MaxMarginUsagePct, symbol)
                 }
             }
         }
