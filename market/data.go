@@ -1,53 +1,57 @@
 package market
 
 import (
-    "encoding/json"
-    "fmt"
-    "io/ioutil"
-    "math"
-    "net/http"
-    "net/url"
-    "os"
-    "strconv"
-    "strings"
-    "time"
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"math"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
 )
 
 // Data 市场数据结构
 type Data struct {
-    Symbol            string
-    CurrentPrice      float64
-    PriceChange1h     float64 // 1小时价格变化百分比
-    PriceChange4h     float64 // 4小时价格变化百分比
-    CurrentEMA20      float64
-    CurrentMACD       float64
-    CurrentMACDHistogram float64
-    // 多周期MACD与柱状图
-    CurrentMACD3m            float64
-    CurrentMACDHistogram3m   float64
-    CurrentMACD15m           float64
-    CurrentMACDHistogram15m  float64
-    CurrentMACD1h            float64
-    CurrentMACDHistogram1h   float64
-    CurrentMACD4h            float64
-    CurrentMACDHistogram4h   float64
-    CurrentRSI7       float64
-    OpenInterest      *OIData
-    FundingRate       float64
-    IntradaySeries    *IntradayData
-    LongerTermContext *LongerTermData
-    Direction3m       string
-    Direction15m      string
-    Direction1h       string
-    Direction4h       string
-    DirectionConsistency int
-    BuySellPressureRatio float64
-    OTEHigh           float64
-    OTELow            float64
-    OTELongLower      float64
-    OTELongUpper      float64
-    OTEShortLower     float64
-    OTEShortUpper     float64
+	Symbol               string
+	CurrentPrice         float64
+	PriceChange1h        float64 // 1小时价格变化百分比
+	PriceChange4h        float64 // 4小时价格变化百分比
+	CurrentEMA20         float64
+	CurrentMACD          float64
+	CurrentMACDHistogram float64
+	// 多周期MACD与柱状图
+	CurrentMACD3m            float64
+	CurrentMACDHistogram3m   float64
+	CurrentMACD15m           float64
+	CurrentMACDHistogram15m  float64
+	CurrentMACD1h            float64
+	CurrentMACDHistogram1h   float64
+	CurrentMACD4h            float64
+	CurrentMACDHistogram4h   float64
+	CurrentRSI7              float64
+	OpenInterest             *OIData
+	FundingRate              float64
+	IntradaySeries           *IntradayData
+	LongerTermContext        *LongerTermData
+	Direction3m              string
+	Direction15m             string
+	Direction1h              string
+	Direction4h              string
+	DirectionConsistency     int
+	BuySellPressureRatio     float64
+	OTEHigh                  float64
+	OTELow                   float64
+	OTELongLower             float64
+	OTELongUpper             float64
+	OTEShortLower            float64
+	OTEShortUpper            float64
+	CurrentRSI15m            float64
+	CurrentRSI1h             float64
+	Last15mUpperShadowToBody float64
+	Last15mLowerShadowToBody float64
 }
 
 // OIData Open Interest数据
@@ -90,58 +94,75 @@ type Kline struct {
 
 // 自定义HTTP客户端：强制使用本地代理 127.0.0.1:7897，以与 okx.py 保持一致
 var httpClient = &http.Client{Timeout: 15 * time.Second, Transport: &http.Transport{Proxy: func(_ *http.Request) (*url.URL, error) {
-    return url.Parse("http://127.0.0.1:7897")
+	return url.Parse("http://127.0.0.1:7897")
 }}}
 
 // Get 获取指定代币的市场数据
 func Get(symbol string) (*Data, error) {
-    // 标准化并校验 symbol（避免空符号被规范化为 USDT 导致下游错误）
-    raw := strings.TrimSpace(symbol)
-    symbol = Normalize(raw)
-    up := strings.ToUpper(symbol)
-    if raw == "" || up == "USDT" || up == "OKXUSDT" {
-        return nil, fmt.Errorf("invalid symbol: '%s' (must be like BTCUSDT)", raw)
-    }
-    if !strings.HasSuffix(up, "USDT") || len(up) <= len("USDT") {
-        return nil, fmt.Errorf("unsupported symbol format: '%s' (must end with USDT)", up)
-    }
+	// 标准化并校验 symbol（避免空符号被规范化为 USDT 导致下游错误）
+	raw := strings.TrimSpace(symbol)
+	symbol = Normalize(raw)
+	up := strings.ToUpper(symbol)
+	if raw == "" || up == "USDT" || up == "OKXUSDT" {
+		return nil, fmt.Errorf("invalid symbol: '%s' (must be like BTCUSDT)", raw)
+	}
+	if !strings.HasSuffix(up, "USDT") || len(up) <= len("USDT") {
+		return nil, fmt.Errorf("unsupported symbol format: '%s' (must end with USDT)", up)
+	}
 
-    klines3m, err := getKlines(symbol, "3m", 80)
-    if err != nil {
-        return nil, fmt.Errorf("failed to fetch 3-minute klines: %v", err)
-    }
+	klines3m, err := getKlines(symbol, "3m", 80)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch 3-minute klines: %v", err)
+	}
 
-    klines15m, err := getKlines(symbol, "15m", 120)
-    if err != nil {
-        return nil, fmt.Errorf("failed to fetch 15-minute klines: %v", err)
-    }
+	klines15m, err := getKlines(symbol, "15m", 120)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch 15-minute klines: %v", err)
+	}
 
-    klines1h, err := getKlines(symbol, "1h", 120)
-    if err != nil {
-        return nil, fmt.Errorf("failed to fetch 1-hour klines: %v", err)
-    }
+	klines1h, err := getKlines(symbol, "1h", 120)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch 1-hour klines: %v", err)
+	}
 
-    klines4h, err := getKlines(symbol, "4h", 120)
-    if err != nil {
-        return nil, fmt.Errorf("failed to fetch 4-hour klines: %v", err)
-    }
+	klines4h, err := getKlines(symbol, "4h", 120)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch 4-hour klines: %v", err)
+	}
 
 	// 计算当前指标 (基于3分钟最新数据)
 	currentPrice := klines3m[len(klines3m)-1].Close
-    currentEMA20 := calculateEMA(klines3m, 20)
-    // 3m
-    macd3m := calculateMACD(klines3m)
-    hist3m := calculateMACDHistogram(klines3m)
-    // 15m
-    macd15m := calculateMACD(klines15m)
-    hist15m := calculateMACDHistogram(klines15m)
-    // 1h
-    macd1h := calculateMACD(klines1h)
-    hist1h := calculateMACDHistogram(klines1h)
-    // 4h
-    macd4h := calculateMACD(klines4h)
-    hist4h := calculateMACDHistogram(klines4h)
-    currentRSI7 := calculateRSI(klines3m, 7)
+	currentEMA20 := calculateEMA(klines3m, 20)
+	// 3m
+	macd3m := calculateMACD(klines3m)
+	hist3m := calculateMACDHistogram(klines3m)
+	// 15m
+	macd15m := calculateMACD(klines15m)
+	hist15m := calculateMACDHistogram(klines15m)
+	// 1h
+	macd1h := calculateMACD(klines1h)
+	hist1h := calculateMACDHistogram(klines1h)
+	// 4h
+	macd4h := calculateMACD(klines4h)
+	hist4h := calculateMACDHistogram(klines4h)
+	currentRSI7 := calculateRSI(klines3m, 7)
+	currentRSI15m := calculateRSI(klines15m, 14)
+	currentRSI1h := calculateRSI(klines1h, 14)
+
+	last15 := klines15m[len(klines15m)-1]
+	body15 := math.Abs(last15.Close - last15.Open)
+	upper15 := last15.High - math.Max(last15.Open, last15.Close)
+	lower15 := math.Min(last15.Open, last15.Close) - last15.Low
+	upperRatio15 := 0.0
+	lowerRatio15 := 0.0
+	if body15 > 0 {
+		if upper15 > 0 {
+			upperRatio15 = upper15 / body15
+		}
+		if lower15 > 0 {
+			lowerRatio15 = lower15 / body15
+		}
+	}
 
 	// 计算价格变化百分比
 	// 1小时价格变化 = 20个3分钟K线前的价格
@@ -172,224 +193,228 @@ func Get(symbol string) (*Data, error) {
 	// 获取Funding Rate
 	fundingRate, _ := getFundingRate(symbol)
 
-    intradayData := calculateIntradaySeries(klines3m)
+	intradayData := calculateIntradaySeries(klines3m)
 
-    longerTermData := calculateLongerTermData(klines4h)
+	longerTermData := calculateLongerTermData(klines4h)
 
-    direction3m := computeDirectionByEMA(klines3m)
-    direction15m := computeDirectionByEMA(klines15m)
-    direction1h := computeDirectionByEMA(klines1h)
-    direction4h := computeDirectionByEMA(klines4h)
+	direction3m := computeDirectionByEMA(klines3m)
+	direction15m := computeDirectionByEMA(klines15m)
+	direction1h := computeDirectionByEMA(klines1h)
+	direction4h := computeDirectionByEMA(klines4h)
 
-    consistency := 0
-    for _, d := range []string{direction3m, direction15m, direction1h, direction4h} {
-        if d == "up" {
-            consistency++
-        }
-    }
-    if consistency < 2 {
-        c := 0
-        for _, d := range []string{direction3m, direction15m, direction1h, direction4h} {
-            if d == "down" {
-                c++
-            }
-        }
-        consistency = c
-    }
+	consistency := 0
+	for _, d := range []string{direction3m, direction15m, direction1h, direction4h} {
+		if d == "up" {
+			consistency++
+		}
+	}
+	if consistency < 2 {
+		c := 0
+		for _, d := range []string{direction3m, direction15m, direction1h, direction4h} {
+			if d == "down" {
+				c++
+			}
+		}
+		consistency = c
+	}
 
-    bsRatio := computeBuySellPressureRatio(klines15m)
+	bsRatio := computeBuySellPressureRatio(klines15m)
 
-    high4h, low4h := recentHighLow(klines4h, 30)
-    oteLongLower := low4h + (high4h-low4h)*0.618
-    oteLongUpper := low4h + (high4h-low4h)*0.705
-    oteShortLower := high4h - (high4h-low4h)*0.705
-    oteShortUpper := high4h - (high4h-low4h)*0.618
+	high4h, low4h := recentHighLow(klines4h, 30)
+	oteLongLower := low4h + (high4h-low4h)*0.618
+	oteLongUpper := low4h + (high4h-low4h)*0.705
+	oteShortLower := high4h - (high4h-low4h)*0.705
+	oteShortUpper := high4h - (high4h-low4h)*0.618
 
-    return &Data{
-        Symbol:            symbol,
-        CurrentPrice:      currentPrice,
-        PriceChange1h:     priceChange1h,
-        PriceChange4h:     priceChange4h,
-        CurrentEMA20:      currentEMA20,
-        CurrentMACD:       macd3m,
-        CurrentMACDHistogram: hist3m,
-        CurrentMACD3m:          macd3m,
-        CurrentMACDHistogram3m: hist3m,
-        CurrentMACD15m:         macd15m,
-        CurrentMACDHistogram15m: hist15m,
-        CurrentMACD1h:          macd1h,
-        CurrentMACDHistogram1h: hist1h,
-        CurrentMACD4h:          macd4h,
-        CurrentMACDHistogram4h: hist4h,
-        CurrentRSI7:       currentRSI7,
-        OpenInterest:      oiData,
-        FundingRate:       fundingRate,
-        IntradaySeries:    intradayData,
-        LongerTermContext: longerTermData,
-        Direction3m:       direction3m,
-        Direction15m:      direction15m,
-        Direction1h:       direction1h,
-        Direction4h:       direction4h,
-        DirectionConsistency: consistency,
-        BuySellPressureRatio: bsRatio,
-        OTEHigh:           high4h,
-        OTELow:            low4h,
-        OTELongLower:      oteLongLower,
-        OTELongUpper:      oteLongUpper,
-        OTEShortLower:     oteShortLower,
-        OTEShortUpper:     oteShortUpper,
-    }, nil
+	return &Data{
+		Symbol:                   symbol,
+		CurrentPrice:             currentPrice,
+		PriceChange1h:            priceChange1h,
+		PriceChange4h:            priceChange4h,
+		CurrentEMA20:             currentEMA20,
+		CurrentMACD:              macd3m,
+		CurrentMACDHistogram:     hist3m,
+		CurrentMACD3m:            macd3m,
+		CurrentMACDHistogram3m:   hist3m,
+		CurrentMACD15m:           macd15m,
+		CurrentMACDHistogram15m:  hist15m,
+		CurrentMACD1h:            macd1h,
+		CurrentMACDHistogram1h:   hist1h,
+		CurrentMACD4h:            macd4h,
+		CurrentMACDHistogram4h:   hist4h,
+		CurrentRSI7:              currentRSI7,
+		CurrentRSI15m:            currentRSI15m,
+		CurrentRSI1h:             currentRSI1h,
+		OpenInterest:             oiData,
+		FundingRate:              fundingRate,
+		IntradaySeries:           intradayData,
+		LongerTermContext:        longerTermData,
+		Direction3m:              direction3m,
+		Direction15m:             direction15m,
+		Direction1h:              direction1h,
+		Direction4h:              direction4h,
+		DirectionConsistency:     consistency,
+		BuySellPressureRatio:     bsRatio,
+		OTEHigh:                  high4h,
+		OTELow:                   low4h,
+		OTELongLower:             oteLongLower,
+		OTELongUpper:             oteLongUpper,
+		OTEShortLower:            oteShortLower,
+		OTEShortUpper:            oteShortUpper,
+		Last15mUpperShadowToBody: upperRatio15,
+		Last15mLowerShadowToBody: lowerRatio15,
+	}, nil
 }
 
 // getKlines 优先从Binance获取K线；失败时回退到OKX
 func getKlines(symbol, interval string, limit int) ([]Kline, error) {
-    var lastErr error
-    var details []string
-    for attempt := 1; attempt <= 3; attempt++ {
-        binanceURL := fmt.Sprintf("https://fapi.binance.com/fapi/v1/klines?symbol=%s&interval=%s&limit=%d", symbol, interval, limit)
-        if kl, err := fetchBinanceKlines(binanceURL); err == nil && len(kl) > 0 {
-            return kl, nil
-        } else if err != nil {
-            lastErr = err
-            details = append(details, fmt.Sprintf("binance:%v", err))
-        }
-        if kl, err := fetchOKXKlines(symbol, interval, limit); err == nil && len(kl) > 0 {
-            return kl, nil
-        } else if err != nil {
-            lastErr = err
-            details = append(details, fmt.Sprintf("okx:%v", err))
-        }
-        time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
-    }
-    if lastErr != nil {
-        return nil, fmt.Errorf("failed to fetch klines: %v [%s]", lastErr, strings.Join(details, "; "))
-    }
-    return nil, fmt.Errorf("failed to fetch klines")
+	var lastErr error
+	var details []string
+	for attempt := 1; attempt <= 3; attempt++ {
+		binanceURL := fmt.Sprintf("https://fapi.binance.com/fapi/v1/klines?symbol=%s&interval=%s&limit=%d", symbol, interval, limit)
+		if kl, err := fetchBinanceKlines(binanceURL); err == nil && len(kl) > 0 {
+			return kl, nil
+		} else if err != nil {
+			lastErr = err
+			details = append(details, fmt.Sprintf("binance:%v", err))
+		}
+		if kl, err := fetchOKXKlines(symbol, interval, limit); err == nil && len(kl) > 0 {
+			return kl, nil
+		} else if err != nil {
+			lastErr = err
+			details = append(details, fmt.Sprintf("okx:%v", err))
+		}
+		time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("failed to fetch klines: %v [%s]", lastErr, strings.Join(details, "; "))
+	}
+	return nil, fmt.Errorf("failed to fetch klines")
 }
 
 // fetchBinanceKlines 获取 Binance K线
 func fetchBinanceKlines(url string) ([]Kline, error) {
-    var lastErr error
-    for attempt := 1; attempt <= 3; attempt++ {
-        resp, err := httpClient.Get(url)
-        if err != nil {
-            lastErr = err
-            time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
-            continue
-        }
-        body, err := ioutil.ReadAll(resp.Body)
-        resp.Body.Close()
-        if err != nil {
-            lastErr = err
-            time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
-            continue
-        }
-        var rawData [][]interface{}
-        if err := json.Unmarshal(body, &rawData); err != nil {
-            lastErr = err
-            time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
-            continue
-        }
-        klines := make([]Kline, len(rawData))
-        for i, item := range rawData {
-            openTime := int64(item[0].(float64))
-            open, _ := parseFloat(item[1])
-            high, _ := parseFloat(item[2])
-            low, _ := parseFloat(item[3])
-            close, _ := parseFloat(item[4])
-            volume, _ := parseFloat(item[5])
-            closeTime := int64(item[6].(float64))
-            klines[i] = Kline{OpenTime: openTime, Open: open, High: high, Low: low, Close: close, Volume: volume, CloseTime: closeTime}
-        }
-        return klines, nil
-    }
-    if lastErr != nil {
-        return nil, lastErr
-    }
-    return nil, fmt.Errorf("binance klines failed")
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		resp, err := httpClient.Get(url)
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+			continue
+		}
+		body, err := ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+			continue
+		}
+		var rawData [][]interface{}
+		if err := json.Unmarshal(body, &rawData); err != nil {
+			lastErr = err
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+			continue
+		}
+		klines := make([]Kline, len(rawData))
+		for i, item := range rawData {
+			openTime := int64(item[0].(float64))
+			open, _ := parseFloat(item[1])
+			high, _ := parseFloat(item[2])
+			low, _ := parseFloat(item[3])
+			close, _ := parseFloat(item[4])
+			volume, _ := parseFloat(item[5])
+			closeTime := int64(item[6].(float64))
+			klines[i] = Kline{OpenTime: openTime, Open: open, High: high, Low: low, Close: close, Volume: volume, CloseTime: closeTime}
+		}
+		return klines, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("binance klines failed")
 }
 
 // fetchOKXKlines 获取 OKX K线（公开行情）
 func fetchOKXKlines(symbol, interval string, limit int) ([]Kline, error) {
-    instID := toOKXInstID(symbol)
-    if instID == "" {
-        return nil, fmt.Errorf("unknown symbol for OKX: %s", symbol)
-    }
-    bar := interval
-    if strings.HasSuffix(interval, "h") || strings.HasSuffix(interval, "H") {
-        bar = strings.ToUpper(interval)
-    }
-    url := fmt.Sprintf("https://www.okx.com/api/v5/market/candles?instId=%s&bar=%s&limit=%d", instID, bar, limit)
-    var lastErr error
-    for attempt := 1; attempt <= 3; attempt++ {
-        resp, err := httpClient.Get(url)
-        if err != nil {
-            lastErr = err
-            time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
-            continue
-        }
-        var payload struct {
-            Code string          `json:"code"`
-            Msg  string          `json:"msg"`
-            Data [][]interface{} `json:"data"`
-        }
-        decErr := json.NewDecoder(resp.Body).Decode(&payload)
-        resp.Body.Close()
-        if decErr != nil {
-            lastErr = decErr
-            time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
-            continue
-        }
-        if payload.Code != "0" || len(payload.Data) == 0 {
-            lastErr = fmt.Errorf("code=%s msg=%s", payload.Code, payload.Msg)
-            time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
-            continue
-        }
-        rawData := payload.Data
-        for i, j := 0, len(rawData)-1; i < j; i, j = i+1, j-1 {
-            rawData[i], rawData[j] = rawData[j], rawData[i]
-        }
-        klines := make([]Kline, len(rawData))
-        for i, item := range rawData {
-            openTime, _ := parseFloat(item[0])
-            open, _ := parseFloat(item[1])
-            high, _ := parseFloat(item[2])
-            low, _ := parseFloat(item[3])
-            close, _ := parseFloat(item[4])
-            volume, _ := parseFloat(item[5])
-            closeTime := int64(openTime)
-            klines[i] = Kline{OpenTime: int64(openTime), Open: open, High: high, Low: low, Close: close, Volume: volume, CloseTime: closeTime}
-        }
-        return klines, nil
-    }
-    if lastErr != nil {
-        return nil, fmt.Errorf("OKX klines failed: %v", lastErr)
-    }
-    return nil, fmt.Errorf("OKX klines failed")
+	instID := toOKXInstID(symbol)
+	if instID == "" {
+		return nil, fmt.Errorf("unknown symbol for OKX: %s", symbol)
+	}
+	bar := interval
+	if strings.HasSuffix(interval, "h") || strings.HasSuffix(interval, "H") {
+		bar = strings.ToUpper(interval)
+	}
+	url := fmt.Sprintf("https://www.okx.com/api/v5/market/candles?instId=%s&bar=%s&limit=%d", instID, bar, limit)
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		resp, err := httpClient.Get(url)
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+			continue
+		}
+		var payload struct {
+			Code string          `json:"code"`
+			Msg  string          `json:"msg"`
+			Data [][]interface{} `json:"data"`
+		}
+		decErr := json.NewDecoder(resp.Body).Decode(&payload)
+		resp.Body.Close()
+		if decErr != nil {
+			lastErr = decErr
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+			continue
+		}
+		if payload.Code != "0" || len(payload.Data) == 0 {
+			lastErr = fmt.Errorf("code=%s msg=%s", payload.Code, payload.Msg)
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+			continue
+		}
+		rawData := payload.Data
+		for i, j := 0, len(rawData)-1; i < j; i, j = i+1, j-1 {
+			rawData[i], rawData[j] = rawData[j], rawData[i]
+		}
+		klines := make([]Kline, len(rawData))
+		for i, item := range rawData {
+			openTime, _ := parseFloat(item[0])
+			open, _ := parseFloat(item[1])
+			high, _ := parseFloat(item[2])
+			low, _ := parseFloat(item[3])
+			close, _ := parseFloat(item[4])
+			volume, _ := parseFloat(item[5])
+			closeTime := int64(openTime)
+			klines[i] = Kline{OpenTime: int64(openTime), Open: open, High: high, Low: low, Close: close, Volume: volume, CloseTime: closeTime}
+		}
+		return klines, nil
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("OKX klines failed: %v", lastErr)
+	}
+	return nil, fmt.Errorf("OKX klines failed")
 }
 
 // toOKXInstID 将标准化符号转换为OKX instId（永续）
 // 例: BTCUSDT -> BTC-USDT-SWAP；OKBUSDT -> OKB-USDT-SWAP
 func toOKXInstID(symbol string) string {
-    // 与 trader/okx_trader.go 保持一致的校验逻辑
-    s := strings.ToUpper(strings.TrimSpace(symbol))
-    if s == "" {
-        return ""
-    }
-    if s == "OKXUSDT" {
-        return ""
-    }
-    if strings.HasSuffix(s, "USDT") {
-        base := strings.TrimSuffix(s, "USDT")
-        if base == "" || base == "OKX" {
-            return ""
-        }
-        if s == "OKBUSDT" || base == "OKB" {
-            return "OKB-USDT-SWAP"
-        }
-        return base + "-USDT-SWAP"
-    }
-    return ""
+	// 与 trader/okx_trader.go 保持一致的校验逻辑
+	s := strings.ToUpper(strings.TrimSpace(symbol))
+	if s == "" {
+		return ""
+	}
+	if s == "OKXUSDT" {
+		return ""
+	}
+	if strings.HasSuffix(s, "USDT") {
+		base := strings.TrimSuffix(s, "USDT")
+		if base == "" || base == "OKX" {
+			return ""
+		}
+		if s == "OKBUSDT" || base == "OKB" {
+			return "OKB-USDT-SWAP"
+		}
+		return base + "-USDT-SWAP"
+	}
+	return ""
 }
 
 // calculateEMA 计算EMA
@@ -429,27 +454,27 @@ func calculateMACD(klines []Kline) float64 {
 }
 
 func calculateMACDHistogram(klines []Kline) float64 {
-    if len(klines) < 26 {
-        return 0
-    }
-    series := make([]float64, 0, len(klines)-25)
-    for i := 25; i < len(klines); i++ {
-        series = append(series, calculateMACD(klines[:i+1]))
-    }
-    if len(series) < 9 {
-        return 0
-    }
-    sum := 0.0
-    for i := 0; i < 9; i++ {
-        sum += series[i]
-    }
-    ema := sum / 9.0
-    m := 2.0 / float64(10)
-    for i := 9; i < len(series); i++ {
-        ema = (series[i]-ema)*m + ema
-    }
-    last := series[len(series)-1]
-    return last - ema
+	if len(klines) < 26 {
+		return 0
+	}
+	series := make([]float64, 0, len(klines)-25)
+	for i := 25; i < len(klines); i++ {
+		series = append(series, calculateMACD(klines[:i+1]))
+	}
+	if len(series) < 9 {
+		return 0
+	}
+	sum := 0.0
+	for i := 0; i < 9; i++ {
+		sum += series[i]
+	}
+	ema := sum / 9.0
+	m := 2.0 / float64(10)
+	for i := 9; i < len(series); i++ {
+		ema = (series[i]-ema)*m + ema
+	}
+	last := series[len(series)-1]
+	return last - ema
 }
 
 // calculateRSI 计算RSI
@@ -623,12 +648,12 @@ func calculateLongerTermData(klines []Kline) *LongerTermData {
 
 // getOpenInterestData 获取OI数据
 func getOpenInterestData(symbol string) (*OIData, error) {
-    url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/openInterest?symbol=%s", symbol)
+	url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/openInterest?symbol=%s", symbol)
 
-    resp, err := httpClient.Get(url)
-    if err != nil {
-        return nil, err
-    }
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
@@ -656,12 +681,12 @@ func getOpenInterestData(symbol string) (*OIData, error) {
 
 // getFundingRate 获取资金费率
 func getFundingRate(symbol string) (float64, error) {
-    url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=%s", symbol)
+	url := fmt.Sprintf("https://fapi.binance.com/fapi/v1/premiumIndex?symbol=%s", symbol)
 
-    resp, err := httpClient.Get(url)
-    if err != nil {
-        return 0, err
-    }
+	resp, err := httpClient.Get(url)
+	if err != nil {
+		return 0, err
+	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
@@ -689,10 +714,10 @@ func getFundingRate(symbol string) (float64, error) {
 
 // Format 格式化输出市场数据
 func Format(data *Data) string {
-    var sb strings.Builder
+	var sb strings.Builder
 
-    sb.WriteString(fmt.Sprintf("current_price = %.2f, current_ema20 = %.3f, current_macd = %.3f, current_macd_hist = %.3f, current_rsi (7 period) = %.3f\n\n",
-        data.CurrentPrice, data.CurrentEMA20, data.CurrentMACD, data.CurrentMACDHistogram, data.CurrentRSI7))
+	sb.WriteString(fmt.Sprintf("current_price = %.2f, current_ema20 = %.3f, current_macd = %.3f, current_macd_hist = %.3f, current_rsi (7 period) = %.3f\n\n",
+		data.CurrentPrice, data.CurrentEMA20, data.CurrentMACD, data.CurrentMACDHistogram, data.CurrentRSI7))
 
 	sb.WriteString(fmt.Sprintf("In addition, here is the latest %s open interest and funding rate for perps:\n\n",
 		data.Symbol))
@@ -728,8 +753,8 @@ func Format(data *Data) string {
 		}
 	}
 
-    if data.LongerTermContext != nil {
-        sb.WriteString("Longer‑term context (4‑hour timeframe):\n\n")
+	if data.LongerTermContext != nil {
+		sb.WriteString("Longer‑term context (4‑hour timeframe):\n\n")
 
 		sb.WriteString(fmt.Sprintf("20‑Period EMA: %.3f vs. 50‑Period EMA: %.3f\n\n",
 			data.LongerTermContext.EMA20, data.LongerTermContext.EMA50))
@@ -744,24 +769,24 @@ func Format(data *Data) string {
 			sb.WriteString(fmt.Sprintf("MACD indicators: %s\n\n", formatFloatSlice(data.LongerTermContext.MACDValues)))
 		}
 
-        if len(data.LongerTermContext.RSI14Values) > 0 {
-            sb.WriteString(fmt.Sprintf("RSI indicators (14‑Period): %s\n\n", formatFloatSlice(data.LongerTermContext.RSI14Values)))
-        }
-    }
+		if len(data.LongerTermContext.RSI14Values) > 0 {
+			sb.WriteString(fmt.Sprintf("RSI indicators (14‑Period): %s\n\n", formatFloatSlice(data.LongerTermContext.RSI14Values)))
+		}
+	}
 
-    if data.Direction3m != "" || data.Direction15m != "" || data.Direction1h != "" || data.Direction4h != "" {
-        sb.WriteString(fmt.Sprintf("Directions (3m/15m/1h/4h): %s/%s/%s/%s | Consistency: %d\n\n", data.Direction3m, data.Direction15m, data.Direction1h, data.Direction4h, data.DirectionConsistency))
-    }
+	if data.Direction3m != "" || data.Direction15m != "" || data.Direction1h != "" || data.Direction4h != "" {
+		sb.WriteString(fmt.Sprintf("Directions (3m/15m/1h/4h): %s/%s/%s/%s | Consistency: %d\n\n", data.Direction3m, data.Direction15m, data.Direction1h, data.Direction4h, data.DirectionConsistency))
+	}
 
-    if data.BuySellPressureRatio > 0 {
-        sb.WriteString(fmt.Sprintf("Buy/Sell Pressure Ratio: %.3f\n\n", data.BuySellPressureRatio))
-    }
+	if data.BuySellPressureRatio > 0 {
+		sb.WriteString(fmt.Sprintf("Buy/Sell Pressure Ratio: %.3f\n\n", data.BuySellPressureRatio))
+	}
 
-    if data.OTEHigh > 0 || data.OTELow > 0 {
-        sb.WriteString(fmt.Sprintf("OTE long range: [%.4f, %.4f] | OTE short range: [%.4f, %.4f] (4h swing: high=%.4f low=%.4f)\n\n", data.OTELongLower, data.OTELongUpper, data.OTEShortLower, data.OTEShortUpper, data.OTEHigh, data.OTELow))
-    }
+	if data.OTEHigh > 0 || data.OTELow > 0 {
+		sb.WriteString(fmt.Sprintf("OTE long range: [%.4f, %.4f] | OTE short range: [%.4f, %.4f] (4h swing: high=%.4f low=%.4f)\n\n", data.OTELongLower, data.OTELongUpper, data.OTEShortLower, data.OTEShortUpper, data.OTEHigh, data.OTELow))
+	}
 
-    return sb.String()
+	return sb.String()
 }
 
 // formatFloatSlice 格式化float64切片为字符串
@@ -775,94 +800,94 @@ func formatFloatSlice(values []float64) string {
 
 // Normalize 标准化symbol,确保是USDT交易对
 func Normalize(symbol string) string {
-    s := strings.ToUpper(strings.TrimSpace(symbol))
-    // 空或仅USDT不进行规范化，交由调用方判错
-    if s == "" || s == "USDT" {
-        return s
-    }
-    if strings.HasSuffix(s, "USDT") {
-        return s
-    }
-    return s + "USDT"
+	s := strings.ToUpper(strings.TrimSpace(symbol))
+	// 空或仅USDT不进行规范化，交由调用方判错
+	if s == "" || s == "USDT" {
+		return s
+	}
+	if strings.HasSuffix(s, "USDT") {
+		return s
+	}
+	return s + "USDT"
 }
 
 func computeDirectionByEMA(klines []Kline) string {
-    if len(klines) < 21 {
-        return "flat"
-    }
-    emaPrev := calculateEMA(append([]Kline{}, klines[:len(klines)-1]...), 20)
-    emaLast := calculateEMA(klines, 20)
-    lastPrice := klines[len(klines)-1].Close
-    if lastPrice <= 0 {
-        lastPrice = 1
-    }
-    slope := emaLast - emaPrev
-    thr := getEmaSlopeThresholdRatio()
-    if slope/lastPrice > thr {
-        return "up"
-    }
-    if (-slope)/lastPrice > thr {
-        return "down"
-    }
-    return "flat"
+	if len(klines) < 21 {
+		return "flat"
+	}
+	emaPrev := calculateEMA(append([]Kline{}, klines[:len(klines)-1]...), 20)
+	emaLast := calculateEMA(klines, 20)
+	lastPrice := klines[len(klines)-1].Close
+	if lastPrice <= 0 {
+		lastPrice = 1
+	}
+	slope := emaLast - emaPrev
+	thr := getEmaSlopeThresholdRatio()
+	if slope/lastPrice > thr {
+		return "up"
+	}
+	if (-slope)/lastPrice > thr {
+		return "down"
+	}
+	return "flat"
 }
 
 func getEmaSlopeThresholdRatio() float64 {
-    v := os.Getenv("NOFX_EMA20_SLOPE_THRESHOLD_PCT")
-    if v != "" {
-        if f, err := strconv.ParseFloat(v, 64); err == nil {
-            if f > 0 {
-                return f / 100.0
-            }
-        }
-    }
-    return 0.001
+	v := os.Getenv("NOFX_EMA20_SLOPE_THRESHOLD_PCT")
+	if v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			if f > 0 {
+				return f / 100.0
+			}
+		}
+	}
+	return 0.001
 }
 
 func computeBuySellPressureRatio(klines []Kline) float64 {
-    if len(klines) == 0 {
-        return 0
-    }
-    start := len(klines) - 40
-    if start < 0 {
-        start = 0
-    }
-    var buyV, sellV float64
-    for i := start; i < len(klines); i++ {
-        if klines[i].Close >= klines[i].Open {
-            buyV += klines[i].Volume
-        } else {
-            sellV += klines[i].Volume
-        }
-    }
-    if sellV == 0 {
-        if buyV == 0 {
-            return 0
-        }
-        return 999
-    }
-    return buyV / sellV
+	if len(klines) == 0 {
+		return 0
+	}
+	start := len(klines) - 40
+	if start < 0 {
+		start = 0
+	}
+	var buyV, sellV float64
+	for i := start; i < len(klines); i++ {
+		if klines[i].Close >= klines[i].Open {
+			buyV += klines[i].Volume
+		} else {
+			sellV += klines[i].Volume
+		}
+	}
+	if sellV == 0 {
+		if buyV == 0 {
+			return 0
+		}
+		return 999
+	}
+	return buyV / sellV
 }
 
 func recentHighLow(klines []Kline, lookback int) (float64, float64) {
-    if len(klines) == 0 {
-        return 0, 0
-    }
-    if lookback > len(klines) {
-        lookback = len(klines)
-    }
-    start := len(klines) - lookback
-    high := klines[start].High
-    low := klines[start].Low
-    for i := start; i < len(klines); i++ {
-        if klines[i].High > high {
-            high = klines[i].High
-        }
-        if klines[i].Low < low {
-            low = klines[i].Low
-        }
-    }
-    return high, low
+	if len(klines) == 0 {
+		return 0, 0
+	}
+	if lookback > len(klines) {
+		lookback = len(klines)
+	}
+	start := len(klines) - lookback
+	high := klines[start].High
+	low := klines[start].Low
+	for i := start; i < len(klines); i++ {
+		if klines[i].High > high {
+			high = klines[i].High
+		}
+		if klines[i].Low < low {
+			low = klines[i].Low
+		}
+	}
+	return high, low
 }
 
 // parseFloat 解析float值

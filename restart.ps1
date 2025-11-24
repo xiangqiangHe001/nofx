@@ -2,7 +2,7 @@ param(
     [int]$ApiPort = $(if ($env:NOFX_API_PORT) { [int]$env:NOFX_API_PORT } else { 8080 }),
     [int]$FrontPort = $(if ($env:NOFX_FRONT_PORT) { [int]$env:NOFX_FRONT_PORT } else { 3000 }),
     [string]$ConfigPath,
-    [string]$PromptVariant = $(if ($env:NOFX_PROMPT_VARIANT) { $env:NOFX_PROMPT_VARIANT } else { 'zhugefan' }),
+    [string]$PromptVariant = $(if ($env:NOFX_PROMPT_VARIANT) { $env:NOFX_PROMPT_VARIANT } else { '' }),
     [int]$ScanMinutesOverride = 0,
     [switch]$InlineRun
 )
@@ -38,21 +38,27 @@ if (-not $ConfigPath -or $ConfigPath.Trim() -eq '') {
     }
 }
 
-# 固定提示词变体与绝对路径校验（确保始终使用 D:\TRAE\projerct\prompt\system_zhugefan.txt 与 user_zhugefan.txt）
-$PromptSystemPath = Join-Path $BaseDir 'prompt\system_zhugefan.txt'
-$PromptUserPath   = Join-Path $BaseDir 'prompt\user_zhugefan.txt'
-if ([string]::IsNullOrWhiteSpace($PromptSystemPath)) { $PromptSystemPath = Join-Path (Get-Location).Path 'prompt\system_zhugefan.txt' }
-if ([string]::IsNullOrWhiteSpace($PromptUserPath)) { $PromptUserPath = Join-Path (Get-Location).Path 'prompt\user_zhugefan.txt' }
-if ([string]::IsNullOrWhiteSpace($PromptSystemPath) -or -not (Test-Path -LiteralPath $PromptSystemPath)) {
-    Write-Host "Prompt system file missing: $PromptSystemPath" -ForegroundColor Red
-    throw "Missing prompt system_zhugefan.txt"
-}
-if ([string]::IsNullOrWhiteSpace($PromptUserPath) -or -not (Test-Path -LiteralPath $PromptUserPath)) {
-    Write-Host "Prompt user file missing: $PromptUserPath" -ForegroundColor Red
-    throw "Missing prompt user_zhugefan.txt"
-}
-Write-Host "Using prompt system: $PromptSystemPath" -ForegroundColor Yellow
-Write-Host "Using prompt user:   $PromptUserPath" -ForegroundColor Yellow
+# 依据配置文件决定提示词模板；若未显式传入 PromptVariant，则使用 config.json 的 prompt_variant
+try {
+    $rawJson = Get-Content -LiteralPath $ConfigPath -Raw
+    if ($rawJson) {
+        $cfgObj = $rawJson | ConvertFrom-Json
+        $cfgVariant = $cfgObj.prompt_variant
+        $cfgSystemPath = $cfgObj.prompt_system_path
+        if (-not $PromptVariant -or $PromptVariant.Trim() -eq '') { $PromptVariant = $cfgVariant }
+        # 导出 NOFX_CONFIG_PATH 以便后端按该路径读取配置中的提示词设定
+        Set-Item env:NOFX_CONFIG_PATH $ConfigPath
+        # 仅当显式指定 PromptVariant 时才覆盖环境变量；否则让后端使用配置中的 prompt_variant
+        if ($PromptVariant -and $PromptVariant.Trim() -ne '') { Set-Item env:NOFX_PROMPT_VARIANT $PromptVariant } else { Remove-Item env:NOFX_PROMPT_VARIANT -ErrorAction SilentlyContinue }
+        # 若配置指定了系统提示词路径，则导出到环境（后端会优先使用该路径）
+        if ($cfgSystemPath -and $cfgSystemPath.Trim() -ne '') { Set-Item env:NOFX_PROMPT_SYSTEM_PATH $cfgSystemPath }
+        if ($cfgSystemPath -and -not (Test-Path -LiteralPath $cfgSystemPath)) {
+            Write-Host "Prompt system file not found: $cfgSystemPath" -ForegroundColor DarkYellow
+        }
+        Write-Host "Prompt variant effective: $PromptVariant" -ForegroundColor Yellow
+        if ($env:NOFX_PROMPT_SYSTEM_PATH) { Write-Host "Prompt system path: $($env:NOFX_PROMPT_SYSTEM_PATH)" -ForegroundColor Yellow }
+    }
+} catch {}
 
 $webDir = Join-Path $BaseDir 'web'
 
@@ -212,7 +218,7 @@ if ($maxMarginPct -and $maxMarginPct -gt 0) {
     Set-Item env:NOFX_MAX_MARGIN_USAGE_PCT $maxMarginPct
 }
 
-$backendCmd = "Set-Item env:API_PORT $ApiPort; Set-Item env:NOFX_PROMPT_VARIANT '$PromptVariant'; cd '$BaseDir'; go run . '$ConfigPath'"
+$backendCmd = "Set-Item env:API_PORT $ApiPort; Set-Item env:NOFX_CONFIG_PATH '$ConfigPath'; if ('$PromptVariant' -ne '') { Set-Item env:NOFX_PROMPT_VARIANT '$PromptVariant' }; cd '$BaseDir'; go run . '$ConfigPath'"
 Write-Host "Backend command: $backendCmd" -ForegroundColor Green
 $backendProc = Start-Process -FilePath "powershell" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command $backendCmd" -WorkingDirectory $PSScriptRoot -PassThru
 Write-Host "Backend started, PID=$($backendProc.Id). Waiting health check..." -ForegroundColor Green
