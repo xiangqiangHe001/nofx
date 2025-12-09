@@ -32,7 +32,7 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
     }
 
 	// 鏋勫缓AutoTraderConfig
-    traderConfig := trader.AutoTraderConfig{
+        traderConfig := trader.AutoTraderConfig{
 		ID:                    cfg.ID,
 		Name:                  cfg.Name,
 		AIModel:               cfg.AIModel,
@@ -66,15 +66,16 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, 
 		AltcoinLeverage:       leverage.AltcoinLeverage, // 浣跨敤閰嶇疆鐨勬潬鏉嗗€嶆暟
 		MaxDailyLoss:          maxDailyLoss,
 		MaxDrawdown:           maxDrawdown,
-        StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
-        MinRiskRewardRatio:    minRiskRewardRatio,
-        MaxMarginUsagePct:     maxMarginUsagePct,
-        CycleWeights: struct{ W4h float64; W1h float64; W15m float64; W3m float64 }{
+		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
+		MinRiskRewardRatio:    minRiskRewardRatio,
+		MaxMarginUsagePct:     maxMarginUsagePct,
+		CycleWeights: struct{ W4h float64; W1h float64; W15m float64; W3m float64 }{
             W4h:  cycleWeights.Weight4h,
             W1h:  cycleWeights.Weight1h,
             W15m: cycleWeights.Weight15m,
             W3m:  cycleWeights.Weight3m,
         },
+		InvertDecisionSide:    cfg.InvertDecisionSide,
     }
 
     // Debug: 打印当前 trader 的扫描间隔配置与换算后的值

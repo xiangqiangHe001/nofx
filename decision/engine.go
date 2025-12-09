@@ -292,6 +292,7 @@ func buildUserPrompt(ctx *Context) string {
 			solData.CurrentMACD4h, solData.CurrentMACDHistogram4h,
 			solData.CurrentRSI7))
 	}
+	sb.WriteString("\n请严格使用```json包裹一个JSON数组作为唯一输出，每个对象包含: symbol, action, stop_loss, take_profit, reasoning。不要输出其他文本。")
 
 	if btcData, ok := ctx.MarketDataMap["BTCUSDT"]; ok {
 		s4 := 0.0
@@ -641,6 +642,43 @@ func extractDecisions(response string) ([]Decision, error) {
 	// 从 [ 开始，匹配括号找到对应的 ]
 	arrayEnd := findMatchingBracket(response, arrayStart)
 	if arrayEnd == -1 {
+		var objs []Decision
+		i := 0
+		for i < len(response) {
+			if response[i] == '{' {
+				end := findMatchingBrace(response, i)
+				if end != -1 {
+					obj := strings.TrimSpace(response[i : end+1])
+					obj = fixMissingQuotes(obj)
+					obj = normalizeChinesePunctuation(obj)
+					obj = fixTrailingCommas(obj)
+					obj = fixRiskUsdExpressions(obj)
+					var one Decision
+					if json.Unmarshal([]byte(obj), &one) == nil {
+						objs = append(objs, one)
+					}
+					i = end + 1
+					continue
+				}
+			}
+			i++
+		}
+		if len(objs) > 0 {
+			return objs, nil
+		}
+		lines := strings.Split(response, "\n")
+		fb := make([]Decision, 0, len(lines))
+		for _, s := range lines {
+			t := strings.TrimSpace(s)
+			if t == "" {
+				continue
+			}
+			sym := inferSymbolFromText(t)
+			fb = append(fb, Decision{Symbol: sym, Action: "wait", Reasoning: t})
+		}
+		if len(fb) > 0 {
+			return fb, nil
+		}
 		return nil, fmt.Errorf("无法找到JSON数组结束")
 	}
 

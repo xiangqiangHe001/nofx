@@ -48,7 +48,7 @@ type TraderConfig struct {
 	CustomAPIKey    string `json:"custom_api_key,omitempty"`
 	CustomModelName string `json:"custom_model_name,omitempty"`
 
-	InitialBalance      float64 `json:"initial_balance"`
+    InitialBalance      float64 `json:"initial_balance"`
 	// 额外投入（追加入金），用于更准确地计算总盈亏基线
 	ExtraInvestment     float64 `json:"extra_investment,omitempty"`
 	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
@@ -58,6 +58,9 @@ type TraderConfig struct {
     CalibrationThreshold        float64 `json:"calibration_threshold,omitempty"`
     PersistInitialBalance       bool    `json:"persist_initial_balance,omitempty"`
     InitialBalanceStateDir      string  `json:"initial_balance_state_dir,omitempty"`
+
+    // 决策方向反转开关：true 时将 open/close 的 long/short 互换
+    InvertDecisionSide bool `json:"invert_decision_side,omitempty"`
 }
 
 // LeverageConfig 鏉犳潌閰嶇疆
