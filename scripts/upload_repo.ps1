@@ -4,7 +4,7 @@ param(
     [string]$Branch = "main",
     [string]$CommitMessage = "chore: whitelist coins & upload (auto)",
     [switch]$Force,
-    [string]$Proxy,
+    [string]$Proxy = $env:NOFX_PROXY,
     [switch]$EnableProxy,
     [switch]$GlobalProxy,
     [switch]$ProxyClear,
@@ -71,6 +71,14 @@ if ($GlobalProxy -and $prevGlobalHttp) { $prevHttpProxy = $prevGlobalHttp }
 $prevHttpsProxy = $prevLocalHttps
 if ($GlobalProxy -and $prevGlobalHttps) { $prevHttpsProxy = $prevGlobalHttps }
 Write-Verbose "Previous proxies selected ($scopeName): http=$prevHttpProxy https=$prevHttpsProxy"
+
+if ($EnableProxy -or ($Proxy -and $Proxy.Length -gt 0)) {
+    # 如果指定了 Proxy（无论是参数还是环境变量），且未显式禁止（此处简化为只要有Proxy就启用，除非未来加DisableProxy）
+    # 但为了兼容旧逻辑，我们假设只要有Proxy值，就应该尝试启用，除非用户没传 EnableProxy？
+    # 原逻辑是 $EnableProxy -and $Proxy。
+    # 既然用户设置了默认环境变量，我们假设如果 Proxy 有值，就自动视为 EnableProxy = $true
+    $EnableProxy = $true 
+}
 
 if ($EnableProxy -and $Proxy) {
     Write-Host "Apply git proxy ($scopeName): $Proxy" -ForegroundColor Yellow
@@ -161,10 +169,15 @@ if ($Token) {
         if ($LASTEXITCODE -ne 0) {
             Write-Host "Push failed with token header. Retrying without extraHeader..." -ForegroundColor Yellow
             & git -c credential.helper= $pushArgs
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "Push failed (Token retry)." -ForegroundColor Red
+                exit 1
+            }
         }
     } catch {
         Write-Host "Push exception: $($_.Exception.Message)" -ForegroundColor Red
         & git -c credential.helper= $pushArgs
+        if ($LASTEXITCODE -ne 0) { exit 1 }
     }
 } else {
     & git $pushArgs
@@ -178,6 +191,7 @@ if ($Token) {
         if ($LASTEXITCODE -ne 0) {
             Write-Host "Push failed. 建议：设置环境变量 NOFX_GITHUB_PAT 或使用 -Token 传入 GitHub PAT（scope: repo）。" -ForegroundColor Red
             Write-Host "示例：在当前会话执行 `$env:NOFX_GITHUB_PAT='ghp_xxx' 后再运行脚本，或直接传入 -Token 参数。" -ForegroundColor Cyan
+            exit 1
         }
     }
 }
