@@ -192,9 +192,18 @@ func (s *Server) setupRoutes() {
 
 // handleHealth 健康检查
 func (s *Server) handleHealth(c *gin.Context) {
+    ids := s.traderManager.GetTraderIDs()
+    statuses := make([]map[string]interface{}, 0)
+    for _, id := range ids {
+        if t, err := s.traderManager.GetTrader(id); err == nil {
+            statuses = append(statuses, t.GetStatus())
+        }
+    }
     c.JSON(http.StatusOK, gin.H{
         "status": "ok",
         "time":   fmt.Sprintf("%s", time.Now().Format(time.RFC3339)),
+        "trader_count": len(ids),
+        "trader_statuses": statuses,
     })
 }
 
@@ -819,15 +828,15 @@ func (s *Server) handlePerformance(c *gin.Context) {
         return
     }
 
-    // 支持通过查询参数 cycles 指定分析周期上限，默认100，最大5000
-    cycles := 100
+    // 支持通过查询参数 cycles 指定分析周期上限，默认200，最大2000
+    cycles := 200
     if cs := c.Query("cycles"); cs != "" {
         if v, e := strconv.Atoi(cs); e == nil && v > 0 {
             cycles = v
         }
     }
-    if cycles > 5000 {
-        cycles = 5000
+    if cycles > 2000 {
+        cycles = 2000
     }
     // 使用持久化决策日志进行分析，确保支持大窗口（最多5000周期）
     performance, err := trader.GetDecisionLogger().AnalyzePerformance(cycles)

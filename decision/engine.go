@@ -72,8 +72,9 @@ type Context struct {
 	MaxMarginUsagePct  float64                 `json:"-"`
 	CycleWeight4h      float64                 `json:"-"`
 	CycleWeight1h      float64                 `json:"-"`
-	CycleWeight15m     float64                 `json:"-"`
-	CycleWeight3m      float64                 `json:"-"`
+    CycleWeight15m     float64                 `json:"-"`
+    CycleWeight3m      float64                 `json:"-"`
+    IdleNoOpenCycles   int                     `json:"-"` // 连续未开仓周期数（供提示词约束使用）
 }
 
 // Decision AI的交易决策
@@ -258,7 +259,7 @@ func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage in
 
 // buildUserPrompt 构建 User Prompt（动态数据）
 func buildUserPrompt(ctx *Context) string {
-	var sb strings.Builder
+    var sb strings.Builder
 
 	// 系统状态
 	sb.WriteString(fmt.Sprintf("**时间**: %s | **周期**: #%d | **运行**: %d分钟\n\n",
@@ -292,7 +293,12 @@ func buildUserPrompt(ctx *Context) string {
 			solData.CurrentMACD4h, solData.CurrentMACDHistogram4h,
 			solData.CurrentRSI7))
 	}
-	sb.WriteString("\n请严格使用```json包裹一个JSON数组作为唯一输出，每个对象包含: symbol, action, stop_loss, take_profit, reasoning。不要输出其他文本。")
+    sb.WriteString("\n请严格使用```json包裹一个JSON数组作为唯一输出，每个对象包含: symbol, action, stop_loss, take_profit, reasoning。不要输出其他文本。")
+
+    // 连续未开仓周期数提示，供模型执行第4周期强制开仓约束
+    if ctx.IdleNoOpenCycles >= 0 {
+        sb.WriteString(fmt.Sprintf("\n连续未开仓周期数: %d（≥3则本周期需强制开仓，且满足硬性暂停/风控未触发）\n", ctx.IdleNoOpenCycles))
+    }
 
 	if btcData, ok := ctx.MarketDataMap["BTCUSDT"]; ok {
 		s4 := 0.0

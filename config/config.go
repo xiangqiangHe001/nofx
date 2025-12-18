@@ -1,24 +1,23 @@
 package config
 
 import (
-    "encoding/json"
-    "fmt"
-    "log"
-    "os"
-    "time"
-    "strings"
+	"encoding/json"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+	"time"
 )
 
 // TraderConfig 鍗曚釜trader鐨勯厤缃?
 type TraderConfig struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"` // 鏄惁鍚敤璇rader
-	AIModel string `json:"ai_model"` // "qwen" or "deepseek"
-    Exchange string `json:"exchange"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Enabled  bool   `json:"enabled"`  // 鏄惁鍚敤璇rader
+	AIModel  string `json:"ai_model"` // "qwen" or "deepseek"
+	Exchange string `json:"exchange"`
 
 	// 浜ゆ槗骞冲彴閫夋嫨锛堜簩閫変竴锛?
-
 
 	// 甯佸畨閰嶇疆
 	BinanceAPIKey    string `json:"binance_api_key,omitempty"`
@@ -34,11 +33,10 @@ type TraderConfig struct {
 	AsterSigner     string `json:"aster_signer,omitempty"`      // Aster API閽卞寘鍦板潃
 	AsterPrivateKey string `json:"aster_private_key,omitempty"` // Aster API閽卞寘绉侀挜
 
-
-    // OKX配置
-    OKXAPIKey     string `json:"okx_api_key,omitempty"`
-    OKXSecretKey  string `json:"okx_secret_key,omitempty"`
-    OKXPassphrase string `json:"okx_passphrase,omitempty"`
+	// OKX配置
+	OKXAPIKey     string `json:"okx_api_key,omitempty"`
+	OKXSecretKey  string `json:"okx_secret_key,omitempty"`
+	OKXPassphrase string `json:"okx_passphrase,omitempty"`
 	// AI閰嶇疆
 	QwenKey     string `json:"qwen_key,omitempty"`
 	DeepSeekKey string `json:"deepseek_key,omitempty"`
@@ -48,139 +46,150 @@ type TraderConfig struct {
 	CustomAPIKey    string `json:"custom_api_key,omitempty"`
 	CustomModelName string `json:"custom_model_name,omitempty"`
 
-    InitialBalance      float64 `json:"initial_balance"`
+	InitialBalance float64 `json:"initial_balance"`
 	// 额外投入（追加入金），用于更准确地计算总盈亏基线
 	ExtraInvestment     float64 `json:"extra_investment,omitempty"`
 	ScanIntervalMinutes int     `json:"scan_interval_minutes"`
 
-    // 初始资金基线自动对齐与持久化（可选）
-    AutoCalibrateInitialBalance bool    `json:"auto_calibrate_initial_balance,omitempty"`
-    CalibrationThreshold        float64 `json:"calibration_threshold,omitempty"`
-    PersistInitialBalance       bool    `json:"persist_initial_balance,omitempty"`
-    InitialBalanceStateDir      string  `json:"initial_balance_state_dir,omitempty"`
+	// 初始资金基线自动对齐与持久化（可选）
+	AutoCalibrateInitialBalance bool    `json:"auto_calibrate_initial_balance,omitempty"`
+	CalibrationThreshold        float64 `json:"calibration_threshold,omitempty"`
+	PersistInitialBalance       bool    `json:"persist_initial_balance,omitempty"`
+	InitialBalanceStateDir      string  `json:"initial_balance_state_dir,omitempty"`
 
-    // 决策方向反转开关：true 时将 open/close 的 long/short 互换
-    InvertDecisionSide bool `json:"invert_decision_side,omitempty"`
+	// 决策方向反转开关：true 时将 open/close 的 long/short 互换
+	InvertDecisionSide bool `json:"invert_decision_side,omitempty"`
 }
 
 // LeverageConfig 鏉犳潌閰嶇疆
 type LeverageConfig struct {
-    BTCETHLeverage  int `json:"btc_eth_leverage"` // BTC鍜孍TH鐨勬潬鏉嗗€嶆暟锛堜富璐︽埛寤鸿5-50锛屽瓙璐︽埛鈮?锛?
-    AltcoinLeverage int `json:"altcoin_leverage"` // 灞卞甯佺殑鏉犳潌鍊嶆暟锛堜富璐︽埛寤鸿5-20锛屽瓙璐︽埛鈮?锛?
+	BTCETHLeverage  int `json:"btc_eth_leverage"` // BTC鍜孍TH鐨勬潬鏉嗗€嶆暟锛堜富璐︽埛寤鸿5-50锛屽瓙璐︽埛鈮?锛?
+	AltcoinLeverage int `json:"altcoin_leverage"` // 灞卞甯佺殑鏉犳潌鍊嶆暟锛堜富璐︽埛寤鸿5-20锛屽瓙璐︽埛鈮?锛?
 }
 
 // CycleWeights 周期权重（百分比，总和建议为100）
 type CycleWeights struct {
-    Weight4h  float64 `json:"weight_4h"`
-    Weight1h  float64 `json:"weight_1h"`
-    Weight15m float64 `json:"weight_15m"`
-    Weight3m  float64 `json:"weight_3m"`
+	Weight4h  float64 `json:"weight_4h"`
+	Weight1h  float64 `json:"weight_1h"`
+	Weight15m float64 `json:"weight_15m"`
+	Weight3m  float64 `json:"weight_3m"`
 }
 
 // Config 鎬婚厤缃?
 type Config struct {
-    Traders            []TraderConfig `json:"traders"`
-    UseDefaultCoins    bool           `json:"use_default_coins"` // 鏄惁浣跨敤榛樿涓绘祦甯佺鍒楄〃
-    DefaultCoins       []string       `json:"default_coins"`     // 榛樿涓绘祦甯佺姹?
-    CoinPoolAPIURL     string         `json:"coin_pool_api_url"`
-    OITopAPIURL        string         `json:"oi_top_api_url"`
-    APIServerPort      int            `json:"api_server_port"`
-    MaxDailyLoss       float64        `json:"max_daily_loss"`
-    MaxDrawdown        float64        `json:"max_drawdown"`
-    StopTradingMinutes int            `json:"stop_trading_minutes"`
-    // 最小风险回报比（硬性校验阈值），默认2.6；可通过环境变量 NOFX_MIN_RISK_REWARD_RATIO 回退设置（当未在配置文件中指定时）
-    MinRiskRewardRatio float64        `json:"min_risk_reward_ratio"`
-    // 保证金总使用率上限（百分比，默认60）。当配置未设置时，允许通过环境变量 NOFX_MAX_MARGIN_USAGE_PCT 回退设置
-    MaxMarginUsagePct  float64        `json:"max_margin_usage_pct"`
-    CycleWeights       CycleWeights   `json:"cycle_weights"`
-    Leverage           LeverageConfig `json:"leverage"` // 鏉犳潌閰嶇疆
-    // 外部仓库兼容适配总开关与模块级开关（默认全部关闭，保证现有行为不变）
-    ExternalCompat     ExternalCompatConfig `json:"external_compat"`
-    // 运行期调试：记录实际加载的配置文件路径（不参与JSON序列化）
-    LoadedFile         string `json:"-"`
+	Traders            []TraderConfig `json:"traders"`
+	UseDefaultCoins    bool           `json:"use_default_coins"` // 鏄惁浣跨敤榛樿涓绘祦甯佺鍒楄〃
+	DefaultCoins       []string       `json:"default_coins"`     // 榛樿涓绘祦甯佺姹?
+	CoinPoolAPIURL     string         `json:"coin_pool_api_url"`
+	OITopAPIURL        string         `json:"oi_top_api_url"`
+	APIServerPort      int            `json:"api_server_port"`
+	MaxDailyLoss       float64        `json:"max_daily_loss"`
+	MaxDrawdown        float64        `json:"max_drawdown"`
+	StopTradingMinutes int            `json:"stop_trading_minutes"`
+	// 最小风险回报比（硬性校验阈值），默认2.6；可通过环境变量 NOFX_MIN_RISK_REWARD_RATIO 回退设置（当未在配置文件中指定时）
+	MinRiskRewardRatio float64 `json:"min_risk_reward_ratio"`
+	// 保证金总使用率上限（百分比，默认60）。当配置未设置时，允许通过环境变量 NOFX_MAX_MARGIN_USAGE_PCT 回退设置
+	MaxMarginUsagePct float64 `json:"max_margin_usage_pct"`
+	// 轮询降级保护的价格变化阈值（百分比，示例：-20 表示 -20%）
+	FallbackStopPct float64        `json:"fallback_stop_pct"`
+	FallbackTakePct float64        `json:"fallback_take_pct"`
+	CycleWeights    CycleWeights   `json:"cycle_weights"`
+	Leverage        LeverageConfig `json:"leverage"` // 鏉犳潌閰嶇疆
+	// 外部仓库兼容适配总开关与模块级开关（默认全部关闭，保证现有行为不变）
+	ExternalCompat ExternalCompatConfig `json:"external_compat"`
+	// 运行期调试：记录实际加载的配置文件路径（不参与JSON序列化）
+	LoadedFile string `json:"-"`
 }
 
 // ExternalCompatConfig 外部仓库适配开关（全部默认关闭）
 type ExternalCompatConfig struct {
-    Enable   bool `json:"external_compat_enable"`
-    API      bool `json:"external_compat_api"`
-    Trader   bool `json:"external_compat_trader"`
-    Decision bool `json:"external_compat_decision"`
-    Market   bool `json:"external_compat_market"`
-    Web      bool `json:"external_compat_web"`
-    Logger   bool `json:"external_compat_logger"`
-    Database bool `json:"external_compat_database"`
+	Enable   bool `json:"external_compat_enable"`
+	API      bool `json:"external_compat_api"`
+	Trader   bool `json:"external_compat_trader"`
+	Decision bool `json:"external_compat_decision"`
+	Market   bool `json:"external_compat_market"`
+	Web      bool `json:"external_compat_web"`
+	Logger   bool `json:"external_compat_logger"`
+	Database bool `json:"external_compat_database"`
 }
 
 // LoadConfig 浠庢枃浠跺姞杞介厤缃?
 func LoadConfig(filename string) (*Config, error) {
-    data, err := os.ReadFile(filename)
-    if err != nil {
-        return nil, fmt.Errorf("璇诲彇閰嶇疆鏂囦欢澶辫触: %w", err)
-    }
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("璇诲彇閰嶇疆鏂囦欢澶辫触: %w", err)
+	}
 
-    var config Config
-    if err := json.Unmarshal(data, &config); err != nil {
-        return nil, fmt.Errorf("瑙ｆ瀽閰嶇疆鏂囦欢澶辫触: %w", err)
-    }
+	var config Config
+	if err := json.Unmarshal(data, &config); err != nil {
+		return nil, fmt.Errorf("瑙ｆ瀽閰嶇疆鏂囦欢澶辫触: %w", err)
+	}
 
-    // 记录实际加载的配置文件路径，便于后端调试接口返回
-    config.LoadedFile = filename
+	// 记录实际加载的配置文件路径，便于后端调试接口返回
+	config.LoadedFile = filename
 
-    // Debug: 打印未校验前的每个 Trader 的扫描间隔
-    log.Printf("[Config] Loaded file: %s, traders=%d", filename, len(config.Traders))
-    // 仅打印包含关键字段的原始文本行，便于比对实际读取的配置
-    for _, line := range strings.Split(string(data), "\n") {
-        if strings.Contains(line, "scan_interval_minutes") || strings.Contains(line, "default_coins") {
-            log.Printf("[Config] Raw line: %s", strings.TrimSpace(line))
-        }
-    }
-    for _, t := range config.Traders {
-        log.Printf("[Config] Pre-validate trader '%s' scan_interval_minutes=%d ai_model=%s exchange=%s", t.ID, t.ScanIntervalMinutes, t.AIModel, t.Exchange)
-    }
+	// Debug: 打印未校验前的每个 Trader 的扫描间隔
+	log.Printf("[Config] Loaded file: %s, traders=%d", filename, len(config.Traders))
+	// 仅打印包含关键字段的原始文本行，便于比对实际读取的配置
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "scan_interval_minutes") || strings.Contains(line, "default_coins") {
+			log.Printf("[Config] Raw line: %s", strings.TrimSpace(line))
+		}
+	}
+	for _, t := range config.Traders {
+		log.Printf("[Config] Pre-validate trader '%s' scan_interval_minutes=%d ai_model=%s exchange=%s", t.ID, t.ScanIntervalMinutes, t.AIModel, t.Exchange)
+	}
 
-    // 设置最小风险回报比默认值；优先使用配置文件，若未设置则尝试使用环境变量作为回退
-    if config.MinRiskRewardRatio <= 0 {
-        if v := os.Getenv("NOFX_MIN_RISK_REWARD_RATIO"); v != "" {
-            // 简单解析为浮点数
-            if rr, err := parseFloatSafe(v); err == nil && rr > 0 {
-                config.MinRiskRewardRatio = rr
-                log.Printf("[Config] Set min_risk_reward_ratio from env NOFX_MIN_RISK_REWARD_RATIO=%.2f", rr)
-            }
-        }
-    }
-    if config.MinRiskRewardRatio <= 0 {
-        config.MinRiskRewardRatio = 2.6
-    }
+	// 设置最小风险回报比默认值；优先使用配置文件，若未设置则尝试使用环境变量作为回退
+	if config.MinRiskRewardRatio <= 0 {
+		if v := os.Getenv("NOFX_MIN_RISK_REWARD_RATIO"); v != "" {
+			// 简单解析为浮点数
+			if rr, err := parseFloatSafe(v); err == nil && rr > 0 {
+				config.MinRiskRewardRatio = rr
+				log.Printf("[Config] Set min_risk_reward_ratio from env NOFX_MIN_RISK_REWARD_RATIO=%.2f", rr)
+			}
+		}
+	}
+	if config.MinRiskRewardRatio <= 0 {
+		config.MinRiskRewardRatio = 2.6
+	}
 
-    // 设置保证金使用率上限默认值；优先使用配置文件，若未设置则尝试使用环境变量作为回退
-    if config.MaxMarginUsagePct <= 0 {
-        if v := os.Getenv("NOFX_MAX_MARGIN_USAGE_PCT"); v != "" {
-            if mm, err := parseFloatSafe(v); err == nil && mm > 0 {
-                config.MaxMarginUsagePct = mm
-                log.Printf("[Config] Set max_margin_usage_pct from env NOFX_MAX_MARGIN_USAGE_PCT=%.0f", mm)
-            }
-        }
-    }
-    if config.MaxMarginUsagePct <= 0 {
-        config.MaxMarginUsagePct = 60.0
-    }
+	// 设置保证金使用率上限默认值；优先使用配置文件，若未设置则尝试使用环境变量作为回退
+	if config.MaxMarginUsagePct <= 0 {
+		if v := os.Getenv("NOFX_MAX_MARGIN_USAGE_PCT"); v != "" {
+			if mm, err := parseFloatSafe(v); err == nil && mm > 0 {
+				config.MaxMarginUsagePct = mm
+				log.Printf("[Config] Set max_margin_usage_pct from env NOFX_MAX_MARGIN_USAGE_PCT=%.0f", mm)
+			}
+		}
+	}
+	if config.MaxMarginUsagePct <= 0 {
+		config.MaxMarginUsagePct = 60.0
+	}
 
-    // 周期权重默认值与规范化
-    if config.CycleWeights.Weight4h <= 0 && config.CycleWeights.Weight1h <= 0 && config.CycleWeights.Weight15m <= 0 && config.CycleWeights.Weight3m <= 0 {
-        config.CycleWeights = CycleWeights{Weight4h: 40, Weight1h: 30, Weight15m: 20, Weight3m: 10}
-    }
-    sumW := config.CycleWeights.Weight4h + config.CycleWeights.Weight1h + config.CycleWeights.Weight15m + config.CycleWeights.Weight3m
-    if sumW <= 0 {
-        config.CycleWeights = CycleWeights{Weight4h: 40, Weight1h: 30, Weight15m: 20, Weight3m: 10}
-        sumW = 100
-    }
-    if sumW != 100 {
-        config.CycleWeights.Weight4h = (config.CycleWeights.Weight4h / sumW) * 100
-        config.CycleWeights.Weight1h = (config.CycleWeights.Weight1h / sumW) * 100
-        config.CycleWeights.Weight15m = (config.CycleWeights.Weight15m / sumW) * 100
-        config.CycleWeights.Weight3m = (config.CycleWeights.Weight3m / sumW) * 100
-    }
+	// 轮询降级保护默认阈值（未设置时给出合理默认）
+	if config.FallbackStopPct == 0 {
+		config.FallbackStopPct = -20.0
+	}
+	if config.FallbackTakePct == 0 {
+		config.FallbackTakePct = 10.0
+	}
+
+	// 周期权重默认值与规范化
+	if config.CycleWeights.Weight4h <= 0 && config.CycleWeights.Weight1h <= 0 && config.CycleWeights.Weight15m <= 0 && config.CycleWeights.Weight3m <= 0 {
+		config.CycleWeights = CycleWeights{Weight4h: 40, Weight1h: 30, Weight15m: 20, Weight3m: 10}
+	}
+	sumW := config.CycleWeights.Weight4h + config.CycleWeights.Weight1h + config.CycleWeights.Weight15m + config.CycleWeights.Weight3m
+	if sumW <= 0 {
+		config.CycleWeights = CycleWeights{Weight4h: 40, Weight1h: 30, Weight15m: 20, Weight3m: 10}
+		sumW = 100
+	}
+	if sumW != 100 {
+		config.CycleWeights.Weight4h = (config.CycleWeights.Weight4h / sumW) * 100
+		config.CycleWeights.Weight1h = (config.CycleWeights.Weight1h / sumW) * 100
+		config.CycleWeights.Weight15m = (config.CycleWeights.Weight15m / sumW) * 100
+		config.CycleWeights.Weight3m = (config.CycleWeights.Weight3m / sumW) * 100
+	}
 
 	// 璁剧疆榛樿鍊硷細濡傛灉use_default_coins鏈缃紙涓篺alse锛変笖娌℃湁閰嶇疆coin_pool_api_url锛屽垯榛樿浣跨敤榛樿甯佺鍒楄〃
 	if !config.UseDefaultCoins && config.CoinPoolAPIURL == "" {
@@ -201,126 +210,120 @@ func LoadConfig(filename string) (*Config, error) {
 		}
 	}
 
-    // 楠岃瘉閰嶇疆
-    if err := config.Validate(); err != nil {
-        return nil, fmt.Errorf("閰嶇疆楠岃瘉澶辫触: %w", err)
-    }
+	// 楠岃瘉閰嶇疆
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("閰嶇疆楠岃瘉澶辫触: %w", err)
+	}
 
-    // Debug: 打印校验后的每个 Trader 的扫描间隔（若为0，会被设置为3）
-    for _, t := range config.Traders {
-        log.Printf("[Config] Post-validate trader '%s' scan_interval_minutes=%d (interval=%s)", t.ID, t.ScanIntervalMinutes, t.GetScanInterval())
-    }
+	// Debug: 打印校验后的每个 Trader 的扫描间隔（若为0，会被设置为3）
+	for _, t := range config.Traders {
+		log.Printf("[Config] Post-validate trader '%s' scan_interval_minutes=%d (interval=%s)", t.ID, t.ScanIntervalMinutes, t.GetScanInterval())
+	}
 
-    return &config, nil
+	return &config, nil
 }
 
 // Validate 楠岃瘉閰嶇疆鏈夋晥鎬?
 func (c *Config) Validate() error {
-    if len(c.Traders) == 0 {
-        return fmt.Errorf("至少需要配置一个trader")
-    }
+	if len(c.Traders) == 0 {
+		return fmt.Errorf("至少需要配置一个trader")
+	}
 
-    traderIDs := make(map[string]bool)
-    for i, trader := range c.Traders {
-        if trader.ID == "" {
-            return fmt.Errorf("trader[%d]: ID不能为空", i)
-        }
-        if traderIDs[trader.ID] {
-            return fmt.Errorf("trader[%d]: ID '%s' 重复", i, trader.ID)
-        }
-        traderIDs[trader.ID] = true
+	traderIDs := make(map[string]bool)
+	for i, trader := range c.Traders {
+		if trader.ID == "" {
+			return fmt.Errorf("trader[%d]: ID不能为空", i)
+		}
+		if traderIDs[trader.ID] {
+			return fmt.Errorf("trader[%d]: ID '%s' 重复", i, trader.ID)
+		}
+		traderIDs[trader.ID] = true
 
-        if trader.Name == "" {
-            return fmt.Errorf("trader[%d]: Name不能为空", i)
-        }
-        if trader.AIModel != "qwen" && trader.AIModel != "deepseek" && trader.AIModel != "custom" {
-            return fmt.Errorf("trader[%d]: ai_model必须是 'qwen', 'deepseek' 或 'custom'", i)
-        }
+		if trader.Name == "" {
+			return fmt.Errorf("trader[%d]: Name不能为空", i)
+		}
+		if trader.AIModel != "qwen" && trader.AIModel != "deepseek" && trader.AIModel != "custom" {
+			return fmt.Errorf("trader[%d]: ai_model必须是 'qwen', 'deepseek' 或 'custom'", i)
+		}
 
-        // 仅允许 OKX 交易所
-        if trader.Exchange == "" {
-            trader.Exchange = "okx"
-        }
-        if trader.Exchange != "okx" {
-            return fmt.Errorf("trader[%d]: 仅支持 OKX 交易所，请将 exchange 设置为 'okx'", i)
-        }
-        if trader.OKXAPIKey == "" || trader.OKXSecretKey == "" || trader.OKXPassphrase == "" {
-            return fmt.Errorf("trader[%d]: 使用OKX时必须配置okx_api_key, okx_secret_key和okx_passphrase", i)
-        }
+		// 仅允许 OKX 交易所
+		if trader.Exchange == "" {
+			trader.Exchange = "okx"
+		}
+		if trader.Exchange != "okx" {
+			return fmt.Errorf("trader[%d]: 仅支持 OKX 交易所，请将 exchange 设置为 'okx'", i)
+		}
+		if trader.OKXAPIKey == "" || trader.OKXSecretKey == "" || trader.OKXPassphrase == "" {
+			return fmt.Errorf("trader[%d]: 使用OKX时必须配置okx_api_key, okx_secret_key和okx_passphrase", i)
+		}
 
-        if trader.AIModel == "qwen" && trader.QwenKey == "" {
-            return fmt.Errorf("trader[%d]: 使用Qwen时必须配置qwen_key", i)
-        }
-        if trader.AIModel == "deepseek" && trader.DeepSeekKey == "" {
-            return fmt.Errorf("trader[%d]: 使用DeepSeek时必须配置deepseek_key", i)
-        }
-        if trader.AIModel == "custom" {
-            if trader.CustomAPIURL == "" {
-                return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_api_url", i)
-            }
-            if trader.CustomAPIKey == "" {
-                return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_api_key", i)
-            }
-            if trader.CustomModelName == "" {
-                return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_model_name", i)
-            }
-        }
+		if trader.AIModel == "qwen" && trader.QwenKey == "" {
+			return fmt.Errorf("trader[%d]: 使用Qwen时必须配置qwen_key", i)
+		}
+		if trader.AIModel == "deepseek" && trader.DeepSeekKey == "" {
+			return fmt.Errorf("trader[%d]: 使用DeepSeek时必须配置deepseek_key", i)
+		}
+		if trader.AIModel == "custom" {
+			if trader.CustomAPIURL == "" {
+				return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_api_url", i)
+			}
+			if trader.CustomAPIKey == "" {
+				return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_api_key", i)
+			}
+			if trader.CustomModelName == "" {
+				return fmt.Errorf("trader[%d]: 使用自定义API时必须配置custom_model_name", i)
+			}
+		}
 
-        if trader.InitialBalance <= 0 {
-            return fmt.Errorf("trader[%d]: initial_balance必须大于0", i)
-        }
-        // 额外投入允许为0或未配置（默认为0），无需强制校验
-        if trader.ScanIntervalMinutes <= 0 {
-            trader.ScanIntervalMinutes = 3
-        }
+		if trader.InitialBalance <= 0 {
+			return fmt.Errorf("trader[%d]: initial_balance必须大于0", i)
+		}
+		// 额外投入允许为0或未配置（默认为0），无需强制校验
+		if trader.ScanIntervalMinutes <= 0 {
+			trader.ScanIntervalMinutes = 3
+		}
 
-        // 设置自动校准阈值默认值
-        if trader.AutoCalibrateInitialBalance && trader.CalibrationThreshold <= 0 {
-            trader.CalibrationThreshold = 1.0
-        }
-    }
+		// 设置自动校准阈值默认值
+		if trader.AutoCalibrateInitialBalance && trader.CalibrationThreshold <= 0 {
+			trader.CalibrationThreshold = 1.0
+		}
+	}
 
-    if c.APIServerPort <= 0 {
-        c.APIServerPort = 8080
-    }
+	if c.APIServerPort <= 0 {
+		c.APIServerPort = 8080
+	}
 
-    if c.Leverage.BTCETHLeverage <= 0 {
-        c.Leverage.BTCETHLeverage = 5
-    }
-    if c.Leverage.AltcoinLeverage <= 0 {
-        c.Leverage.AltcoinLeverage = 5
-    }
+	if c.Leverage.BTCETHLeverage <= 0 {
+		c.Leverage.BTCETHLeverage = 5
+	}
+	if c.Leverage.AltcoinLeverage <= 0 {
+		c.Leverage.AltcoinLeverage = 5
+	}
 
-    // ExternalCompat 默认全部关闭（布尔零值即为false，此处仅强调保持现状）
-    // c.ExternalCompat.Enable = c.ExternalCompat.Enable && false
-    // c.ExternalCompat.API = c.ExternalCompat.API && false
-    // c.ExternalCompat.Trader = c.ExternalCompat.Trader && false
-    // c.ExternalCompat.Decision = c.ExternalCompat.Decision && false
-    // c.ExternalCompat.Market = c.ExternalCompat.Market && false
-    // c.ExternalCompat.Web = c.ExternalCompat.Web && false
+	// ExternalCompat 默认全部关闭（布尔零值即为false，此处仅强调保持现状）
+	// c.ExternalCompat.Enable = c.ExternalCompat.Enable && false
+	// c.ExternalCompat.API = c.ExternalCompat.API && false
+	// c.ExternalCompat.Trader = c.ExternalCompat.Trader && false
+	// c.ExternalCompat.Decision = c.ExternalCompat.Decision && false
+	// c.ExternalCompat.Market = c.ExternalCompat.Market && false
+	// c.ExternalCompat.Web = c.ExternalCompat.Web && false
 
-    return nil
+	return nil
 }
 
 func (tc *TraderConfig) GetScanInterval() time.Duration {
-    return time.Duration(tc.ScanIntervalMinutes) * time.Minute
+	return time.Duration(tc.ScanIntervalMinutes) * time.Minute
 }
 
 // parseFloatSafe 尝试解析字符串为 float64（支持简单格式），失败返回错误
 func parseFloatSafe(s string) (float64, error) {
-    // 避免引入额外库，这里使用 fmt 和字符串清理
-    // 移除可能的百分号或空格
-    cleaned := strings.TrimSpace(strings.TrimSuffix(s, "%"))
-    var f float64
-    _, err := fmt.Sscanf(cleaned, "%f", &f)
-    if err != nil {
-        return 0, err
-    }
-    return f, nil
+	// 避免引入额外库，这里使用 fmt 和字符串清理
+	// 移除可能的百分号或空格
+	cleaned := strings.TrimSpace(strings.TrimSuffix(s, "%"))
+	var f float64
+	_, err := fmt.Sscanf(cleaned, "%f", &f)
+	if err != nil {
+		return 0, err
+	}
+	return f, nil
 }
-
-
-
-
-
-

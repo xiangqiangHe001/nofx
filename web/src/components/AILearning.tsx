@@ -52,8 +52,8 @@ interface AILearningProps {
 export default function AILearning({ traderId }: AILearningProps) {
   const { language } = useLanguage();
   const { data: performance, error } = useSWR<PerformanceAnalysis>(
-    traderId ? `performance-${traderId}-cycles-5000` : 'performance-cycles-5000',
-    () => api.getPerformance(traderId, 5000),
+    traderId ? `performance-${traderId}-cycles-2000` : 'performance-cycles-2000',
+    () => api.getPerformance(traderId, 2000),
     {
       refreshInterval: 30000, // 30秒刷新（AI学习分析数据更新频率较低）
       revalidateOnFocus: false,

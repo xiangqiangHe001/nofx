@@ -11,8 +11,8 @@ import (
 
 // TraderManager 绠＄悊澶氫釜trader瀹炰緥
 type TraderManager struct {
-    traders map[string]*trader.AutoTrader // key: trader ID
-    mu      sync.RWMutex
+	traders map[string]*trader.AutoTrader // key: trader ID
+	mu      sync.RWMutex
 }
 
 // NewTraderManager 鍒涘缓trader绠＄悊鍣?
@@ -23,73 +23,80 @@ func NewTraderManager() *TraderManager {
 }
 
 // AddTrader 娣诲姞涓€涓猼rader
-func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, minRiskRewardRatio float64, maxMarginUsagePct float64, cycleWeights config.CycleWeights) error {
-    tm.mu.Lock()
-    defer tm.mu.Unlock()
+func (tm *TraderManager) AddTrader(cfg config.TraderConfig, coinPoolURL string, maxDailyLoss, maxDrawdown float64, stopTradingMinutes int, leverage config.LeverageConfig, minRiskRewardRatio float64, maxMarginUsagePct float64, cycleWeights config.CycleWeights, fallbackStopPct float64, fallbackTakePct float64) error {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
 
-    if _, exists := tm.traders[cfg.ID]; exists {
-        return fmt.Errorf("trader ID '%s' 已存在", cfg.ID)
-    }
+	if _, exists := tm.traders[cfg.ID]; exists {
+		return fmt.Errorf("trader ID '%s' 已存在", cfg.ID)
+	}
 
 	// 鏋勫缓AutoTraderConfig
-        traderConfig := trader.AutoTraderConfig{
-		ID:                    cfg.ID,
-		Name:                  cfg.Name,
-		AIModel:               cfg.AIModel,
-		Exchange:              cfg.Exchange,
-		BinanceAPIKey:         cfg.BinanceAPIKey,
-		BinanceSecretKey:      cfg.BinanceSecretKey,
-		HyperliquidPrivateKey: cfg.HyperliquidPrivateKey,
-		HyperliquidWalletAddr: cfg.HyperliquidWalletAddr,
-		HyperliquidTestnet:    cfg.HyperliquidTestnet,
-		AsterUser:             cfg.AsterUser,
-		AsterSigner:           cfg.AsterSigner,
-		AsterPrivateKey:       cfg.AsterPrivateKey,
-		CoinPoolAPIURL:        coinPoolURL,
-        OKXAPIKey:           cfg.OKXAPIKey,
-        OKXSecretKey:        cfg.OKXSecretKey,
-        OKXPassphrase:       cfg.OKXPassphrase,
-		UseQwen:               cfg.AIModel == "qwen",
-		DeepSeekKey:           cfg.DeepSeekKey,
-		QwenKey:               cfg.QwenKey,
-		CustomAPIURL:          cfg.CustomAPIURL,
-		CustomAPIKey:          cfg.CustomAPIKey,
-		CustomModelName:       cfg.CustomModelName,
-		ScanInterval:          cfg.GetScanInterval(),
-		InitialBalance:        cfg.InitialBalance,
-        ExtraInvestment:        cfg.ExtraInvestment,
-        AutoCalibrateInitialBalance: cfg.AutoCalibrateInitialBalance,
-        CalibrationThreshold:        cfg.CalibrationThreshold,
-        PersistInitialBalance:       cfg.PersistInitialBalance,
-        InitialBalanceStateDir:      cfg.InitialBalanceStateDir,
-		BTCETHLeverage:        leverage.BTCETHLeverage,  // 浣跨敤閰嶇疆鐨勬潬鏉嗗€嶆暟
-		AltcoinLeverage:       leverage.AltcoinLeverage, // 浣跨敤閰嶇疆鐨勬潬鏉嗗€嶆暟
-		MaxDailyLoss:          maxDailyLoss,
-		MaxDrawdown:           maxDrawdown,
-		StopTradingTime:       time.Duration(stopTradingMinutes) * time.Minute,
-		MinRiskRewardRatio:    minRiskRewardRatio,
-		MaxMarginUsagePct:     maxMarginUsagePct,
-		CycleWeights: struct{ W4h float64; W1h float64; W15m float64; W3m float64 }{
-            W4h:  cycleWeights.Weight4h,
-            W1h:  cycleWeights.Weight1h,
-            W15m: cycleWeights.Weight15m,
-            W3m:  cycleWeights.Weight3m,
-        },
-		InvertDecisionSide:    cfg.InvertDecisionSide,
-    }
+	traderConfig := trader.AutoTraderConfig{
+		ID:                          cfg.ID,
+		Name:                        cfg.Name,
+		AIModel:                     cfg.AIModel,
+		Exchange:                    cfg.Exchange,
+		BinanceAPIKey:               cfg.BinanceAPIKey,
+		BinanceSecretKey:            cfg.BinanceSecretKey,
+		HyperliquidPrivateKey:       cfg.HyperliquidPrivateKey,
+		HyperliquidWalletAddr:       cfg.HyperliquidWalletAddr,
+		HyperliquidTestnet:          cfg.HyperliquidTestnet,
+		AsterUser:                   cfg.AsterUser,
+		AsterSigner:                 cfg.AsterSigner,
+		AsterPrivateKey:             cfg.AsterPrivateKey,
+		CoinPoolAPIURL:              coinPoolURL,
+		OKXAPIKey:                   cfg.OKXAPIKey,
+		OKXSecretKey:                cfg.OKXSecretKey,
+		OKXPassphrase:               cfg.OKXPassphrase,
+		UseQwen:                     cfg.AIModel == "qwen",
+		DeepSeekKey:                 cfg.DeepSeekKey,
+		QwenKey:                     cfg.QwenKey,
+		CustomAPIURL:                cfg.CustomAPIURL,
+		CustomAPIKey:                cfg.CustomAPIKey,
+		CustomModelName:             cfg.CustomModelName,
+		ScanInterval:                cfg.GetScanInterval(),
+		InitialBalance:              cfg.InitialBalance,
+		ExtraInvestment:             cfg.ExtraInvestment,
+		AutoCalibrateInitialBalance: cfg.AutoCalibrateInitialBalance,
+		CalibrationThreshold:        cfg.CalibrationThreshold,
+		PersistInitialBalance:       cfg.PersistInitialBalance,
+		InitialBalanceStateDir:      cfg.InitialBalanceStateDir,
+		BTCETHLeverage:              leverage.BTCETHLeverage,  // 浣跨敤閰嶇疆鐨勬潬鏉嗗€嶆暟
+		AltcoinLeverage:             leverage.AltcoinLeverage, // 浣跨敤閰嶇疆鐨勬潬鏉嗗€嶆暟
+		MaxDailyLoss:                maxDailyLoss,
+		MaxDrawdown:                 maxDrawdown,
+		StopTradingTime:             time.Duration(stopTradingMinutes) * time.Minute,
+		MinRiskRewardRatio:          minRiskRewardRatio,
+		MaxMarginUsagePct:           maxMarginUsagePct,
+		FallbackStopPct:             fallbackStopPct,
+		FallbackTakePct:             fallbackTakePct,
+		CycleWeights: struct {
+			W4h  float64
+			W1h  float64
+			W15m float64
+			W3m  float64
+		}{
+			W4h:  cycleWeights.Weight4h,
+			W1h:  cycleWeights.Weight1h,
+			W15m: cycleWeights.Weight15m,
+			W3m:  cycleWeights.Weight3m,
+		},
+		InvertDecisionSide: cfg.InvertDecisionSide,
+	}
 
-    // Debug: 打印当前 trader 的扫描间隔配置与换算后的值
-    log.Printf("[Manager] AddTrader '%s' (%s): scan_interval_minutes=%d -> interval=%s", cfg.ID, cfg.Name, cfg.ScanIntervalMinutes, cfg.GetScanInterval())
+	// Debug: 打印当前 trader 的扫描间隔配置与换算后的值
+	log.Printf("[Manager] AddTrader '%s' (%s): scan_interval_minutes=%d -> interval=%s", cfg.ID, cfg.Name, cfg.ScanIntervalMinutes, cfg.GetScanInterval())
 
-    // 鍒涘缓trader瀹炰緥
-    at, err := trader.NewAutoTrader(traderConfig)
-    if err != nil {
-        return fmt.Errorf("鍒涘缓trader澶辫触: %w", err)
-    }
+	// 鍒涘缓trader瀹炰緥
+	at, err := trader.NewAutoTrader(traderConfig)
+	if err != nil {
+		return fmt.Errorf("鍒涘缓trader澶辫触: %w", err)
+	}
 
-    tm.traders[cfg.ID] = at
-    log.Printf("✅ Trader '%s' (%s) 已添加", cfg.Name, cfg.AIModel)
-    return nil
+	tm.traders[cfg.ID] = at
+	log.Printf("✅ Trader '%s' (%s) 已添加", cfg.Name, cfg.AIModel)
+	return nil
 }
 
 // GetTrader 鑾峰彇鎸囧畾ID鐨則rader
@@ -97,11 +104,11 @@ func (tm *TraderManager) GetTrader(id string) (*trader.AutoTrader, error) {
 	tm.mu.RLock()
 	defer tm.mu.RUnlock()
 
-    t, exists := tm.traders[id]
-    if !exists {
-        return nil, fmt.Errorf("trader ID '%s' 不存在", id)
-    }
-    return t, nil
+	t, exists := tm.traders[id]
+	if !exists {
+		return nil, fmt.Errorf("trader ID '%s' 不存在", id)
+	}
+	return t, nil
 }
 
 // GetAllTraders 鑾峰彇鎵€鏈塼rader
@@ -194,61 +201,61 @@ func (tm *TraderManager) GetComparisonData() (map[string]interface{}, error) {
 // CloseAllPositions 清空所有Trader的所有持仓
 // 返回每个trader的平仓数量与错误信息
 func (tm *TraderManager) CloseAllPositions() map[string]interface{} {
-    tm.mu.RLock()
-    defer tm.mu.RUnlock()
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
 
-    result := make(map[string]interface{})
-    for id, t := range tm.traders {
-        count, err := t.CloseAllPositions()
-        entry := map[string]interface{}{
-            "closed_count": count,
-        }
-        if err != nil {
-            entry["error"] = err.Error()
-        } else {
-            entry["success"] = true
-        }
-        result[id] = entry
-    }
-    return result
+	result := make(map[string]interface{})
+	for id, t := range tm.traders {
+		count, err := t.CloseAllPositions()
+		entry := map[string]interface{}{
+			"closed_count": count,
+		}
+		if err != nil {
+			entry["error"] = err.Error()
+		} else {
+			entry["success"] = true
+		}
+		result[id] = entry
+	}
+	return result
 }
 
 // RunOnceAll 为所有Trader执行一次AI决策周期
 func (tm *TraderManager) RunOnceAll() map[string]interface{} {
-    tm.mu.RLock()
-    defer tm.mu.RUnlock()
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
 
-    result := make(map[string]interface{})
-    for id, t := range tm.traders {
-        err := t.RunOnce()
-        entry := map[string]interface{}{}
-        if err != nil {
-            entry["error"] = err.Error()
-        } else {
-            entry["success"] = true
-        }
-        result[id] = entry
-    }
-    return result
+	result := make(map[string]interface{})
+	for id, t := range tm.traders {
+		err := t.RunOnce()
+		entry := map[string]interface{}{}
+		if err != nil {
+			entry["error"] = err.Error()
+		} else {
+			entry["success"] = true
+		}
+		result[id] = entry
+	}
+	return result
 }
 
 // RunAiCloseThenOpenAll 让所有Trader执行：AI平仓阶段 -> AI开仓阶段
 func (tm *TraderManager) RunAiCloseThenOpenAll() map[string]interface{} {
-    tm.mu.RLock()
-    defer tm.mu.RUnlock()
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
 
-    result := make(map[string]interface{})
-    for id, t := range tm.traders {
-        res, err := t.RunAiCloseThenOpen()
-        entry := map[string]interface{}{
-            "result": res,
-        }
-        if err != nil {
-            entry["error"] = err.Error()
-        } else {
-            entry["success"] = true
-        }
-        result[id] = entry
-    }
-    return result
+	result := make(map[string]interface{})
+	for id, t := range tm.traders {
+		res, err := t.RunAiCloseThenOpen()
+		entry := map[string]interface{}{
+			"result": res,
+		}
+		if err != nil {
+			entry["error"] = err.Error()
+		} else {
+			entry["success"] = true
+		}
+		result[id] = entry
+	}
+	return result
 }

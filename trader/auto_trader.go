@@ -159,7 +159,10 @@ type AutoTraderConfig struct {
 	MinRiskRewardRatio float64 // 最小风险回报比（硬性校验）
 	// 保证金使用率上限（百分比）
 	MaxMarginUsagePct float64
-	CycleWeights      struct {
+	// 轮询降级保护阈值（价格变化百分比）
+	FallbackStopPct float64
+	FallbackTakePct float64
+	CycleWeights    struct {
 		W4h  float64
 		W1h  float64
 		W15m float64
@@ -207,12 +210,18 @@ type AutoTrader struct {
 
 	// 软止损/止盈阈值（仅在AI周期内评估触发），按持仓方向记录绝对价格
 	softStopPrices map[string]float64 // key: symbol_side -> stop price
-    softTakePrices map[string]float64 // key: symbol_side -> take price
+	softTakePrices map[string]float64 // key: symbol_side -> take price
 
-    // 周期控制
-    lastCycleStart  time.Time
-    nextCycleDue    time.Time
-    cycleTolerance  time.Duration
+	// 周期控制
+	lastCycleStart time.Time
+	nextCycleDue   time.Time
+	cycleTolerance time.Duration
+
+	// 持仓周期门控
+	currentCycleIndex int
+	openCycleIndex    map[string]int // key: symbol_side -> cycleIndex when opened
+	// 软止盈/止损触发后的AI分析冷却周期计数（>0 时，本周期不调用AI）
+	skipAiCycles int
 }
 
 // NewAutoTrader 创建自动交易器
@@ -243,6 +252,14 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 	} else {
 		aiClient.SetDeepSeekAPIKey(config.DeepSeekKey)
 		log.Printf("🤖 [%s] 使用DeepSeek AI", config.Name)
+	}
+
+	// AI接口超时配置（环境变量 NOFX_AI_TIMEOUT_SECONDS 优先）
+	if v := os.Getenv("NOFX_AI_TIMEOUT_SECONDS"); strings.TrimSpace(v) != "" {
+		if sec, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && sec > 0 {
+			aiClient.Timeout = time.Duration(sec) * time.Second
+			log.Printf("⏱️ [%s] AI接口超时: %ds", config.Name, sec)
+		}
 	}
 
 	// 初始化币种池API
@@ -318,6 +335,12 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		softStopPrices:        make(map[string]float64),
 		softTakePrices:        make(map[string]float64),
 	}
+	if config.FallbackStopPct != 0 {
+		at.fallbackStopLossPct = config.FallbackStopPct
+	}
+	if config.FallbackTakePct != 0 {
+		at.fallbackTakeProfitPct = config.FallbackTakePct
+	}
 
 	// 初始余额持久化加载（可选）
 	if config.PersistInitialBalance && config.InitialBalanceStateDir != "" {
@@ -350,9 +373,10 @@ func NewAutoTrader(config AutoTraderConfig) (*AutoTrader, error) {
 		}
 	}
 
-    // 周期容差（用于对齐边界与时间门控容错）
-    at.cycleTolerance = 3 * time.Second
-    return at, nil
+	// 周期容差（用于对齐边界与时间门控容错）
+	at.cycleTolerance = 3 * time.Second
+	at.openCycleIndex = make(map[string]int)
+	return at, nil
 }
 
 // Run 运行自动交易主循环
@@ -373,6 +397,14 @@ func (at *AutoTrader) Run() error {
 		// 提示系统模板文件名，便于快速确认实际使用的模板
 		log.Printf("🧩 当前提示词模板: %s (prompt/system_%s.txt)", variant, variant)
 	}()
+	// 反向决策开关提示
+	func() {
+		state := "关闭"
+		if at.config.InvertDecisionSide {
+			state = "启用"
+		}
+		log.Printf("🔁 反向决策开关: %s", state)
+	}()
 	log.Println("🤖 AI将全权决定杠杆、仓位大小、止损止盈等参数")
 
 	interval := at.config.ScanInterval
@@ -383,38 +415,40 @@ func (at *AutoTrader) Run() error {
 	if intervalSec > 0 && remainder != 0 {
 		delay = time.Duration(intervalSec-remainder) * time.Second
 	}
-    if delay > 0 {
-        log.Printf("⌛ 对齐扫描周期，等待 %s 后执行首次决策", delay.String())
-        time.Sleep(delay)
-    }
+	if delay > 0 {
+		log.Printf("⌛ 对齐扫描周期，等待 %s 后执行首次决策", delay.String())
+		time.Sleep(delay)
+	}
 
-    // 记录本次周期起点与下次到期
-    at.lastCycleStart = time.Now()
-    at.nextCycleDue = at.lastCycleStart.Add(interval)
+	// 记录本次周期起点与下次到期
+	at.lastCycleStart = time.Now()
+	at.nextCycleDue = at.lastCycleStart.Add(interval)
 
-    err := at.runCycle()
-    if err != nil {
-        log.Printf("❌ 执行失败: %v", err)
-    }
+	// 第一个周期计数
+	at.currentCycleIndex = 1
+	err := at.runCycle()
+	if err != nil {
+		log.Printf("❌ 执行失败: %v", err)
+	}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-    for at.isRunning {
-        <-ticker.C
-        // 防止提前于对齐边界运行：若尚未到达下一个周期到期点，则跳过本次触发
-        now := time.Now()
-        if now.Add(at.cycleTolerance).Before(at.nextCycleDue) {
-            continue
-        }
-        at.lastCycleStart = now
-        at.nextCycleDue = at.lastCycleStart.Add(interval)
-
-        err = at.runCycle()
-        if err != nil {
-            log.Printf("❌ 执行失败: %v", err)
-        }
-    }
+	for at.isRunning {
+		<-ticker.C
+		// 防止提前于对齐边界运行：若尚未到达下一个周期到期点，则跳过本次触发
+		now := time.Now()
+		if now.Add(at.cycleTolerance).Before(at.nextCycleDue) {
+			continue
+		}
+		at.lastCycleStart = now
+		at.nextCycleDue = at.lastCycleStart.Add(interval)
+		at.currentCycleIndex++
+		err = at.runCycle()
+		if err != nil {
+			log.Printf("❌ 执行失败: %v", err)
+		}
+	}
 
 	return nil
 }
@@ -425,7 +459,6 @@ func (at *AutoTrader) Stop() {
 	log.Println("⏹ 自动交易系统停止")
 }
 
-// enforceFallbackSLTP 轮询降级触发止损/止盈（简单保护：默认 -5% / +10%）
 func (at *AutoTrader) enforceFallbackSLTP(positions []map[string]interface{}) {
 	if !at.executionEnabled {
 		return
@@ -443,27 +476,55 @@ func (at *AutoTrader) enforceFallbackSLTP(positions []map[string]interface{}) {
 			continue
 		}
 
-		// 计算涨跌百分比（相对入场价）
-		changePct := 0.0
+		// 计算按“本次投入资金（初始保证金）”口径的收益百分比
+		// 初始保证金 ≈ 开仓名义价值 / 杠杆 = (数量 * 入场价) / 杠杆
+		// 收益百分比 = 未实现盈亏 / 初始保证金 * 100
+		unrealizedPnl, _ := pos["unRealizedProfit"].(float64) // 未实现盈亏（美元）
+		lev := 10.0
+		if l, ok := pos["leverage"].(float64); ok && l > 0 {
+			lev = l
+		}
+		entryMargin := (qty * entryPrice) / lev
+		if entryMargin <= 0 {
+			// 若无法计算初始保证金，则跳过避免误判
+			continue
+		}
+		pnlPct := (unrealizedPnl / entryMargin) * 100
+
+		// 完全按“收益百分比”触发软止损/止盈（忽略价格变化百分比）
 		if side == "long" {
-			changePct = ((markPrice - entryPrice) / entryPrice) * 100
-			// long: 跌到止损或涨到止盈
-			if changePct <= at.fallbackStopLossPct {
-				log.Printf("  🛡️  Fallback SL 触发: %s long Δ=%.2f%%，平仓保护", symbol, changePct)
+			if pnlPct <= at.fallbackStopLossPct {
+				log.Printf("  🛡️  Fallback SL 触发: %s long PnL=%.4f (%.2f%% 相对投入 %.4f)，平仓保护", symbol, unrealizedPnl, pnlPct, entryMargin)
 				_, _ = at.trader.CloseLong(symbol, 0)
-			} else if changePct >= at.fallbackTakeProfitPct {
-				log.Printf("  🛡️  Fallback TP 触发: %s long Δ=%.2f%%，平仓止盈", symbol, changePct)
+				if at.skipAiCycles < 2 {
+					at.skipAiCycles = 2
+				}
+				continue
+			}
+			if pnlPct >= at.fallbackTakeProfitPct {
+				log.Printf("  🛡️  Fallback TP 触发: %s long PnL=%.4f (%.2f%% 相对投入 %.4f)，平仓止盈", symbol, unrealizedPnl, pnlPct, entryMargin)
 				_, _ = at.trader.CloseLong(symbol, 0)
+				if at.skipAiCycles < 2 {
+					at.skipAiCycles = 2
+				}
+				continue
 			}
 		} else {
-			changePct = ((entryPrice - markPrice) / entryPrice) * 100
-			// short: 涨到止损或跌到止盈
-			if changePct <= at.fallbackStopLossPct {
-				log.Printf("  🛡️  Fallback SL 触发: %s short Δ=%.2f%%，平仓保护", symbol, changePct)
+			if pnlPct <= at.fallbackStopLossPct {
+				log.Printf("  🛡️  Fallback SL 触发: %s short PnL=%.4f (%.2f%% 相对投入 %.4f)，平仓保护", symbol, unrealizedPnl, pnlPct, entryMargin)
 				_, _ = at.trader.CloseShort(symbol, 0)
-			} else if changePct >= at.fallbackTakeProfitPct {
-				log.Printf("  🛡️  Fallback TP 触发: %s short Δ=%.2f%%，平仓止盈", symbol, changePct)
+				if at.skipAiCycles < 2 {
+					at.skipAiCycles = 2
+				}
+				continue
+			}
+			if pnlPct >= at.fallbackTakeProfitPct {
+				log.Printf("  🛡️  Fallback TP 触发: %s short PnL=%.4f (%.2f%% 相对投入 %.4f)，平仓止盈", symbol, unrealizedPnl, pnlPct, entryMargin)
 				_, _ = at.trader.CloseShort(symbol, 0)
+				if at.skipAiCycles < 2 {
+					at.skipAiCycles = 2
+				}
+				continue
 			}
 		}
 	}
@@ -564,20 +625,31 @@ func (at *AutoTrader) runCycle() error {
 	log.Printf("Account equity: %.2f USDT | Available: %.2f USDT | Positions: %d",
 		ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
 
+	// 若处于AI分析冷却期：本周期跳过AI分析，仅记录并结束
+	if at.skipAiCycles > 0 {
+		log.Printf("⛔ 软止盈/止损冷却：跳过AI分析，本次仍执行持仓管理与降级保护；剩余冷却周期：%d", at.skipAiCycles)
+		record.SystemPrompt = fallbackSystemPrompt
+		record.DecisionJSON = "[]"
+		record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("skip_ai_due_to_soft_sl_tp_cooldown cycles_remaining=%d", at.skipAiCycles))
+		at.skipAiCycles--
+		_ = at.decisionLogger.LogDecision(record)
+		return nil
+	}
+
 	// 4. 调用AI获取完整决策
 	log.Println("Requesting AI analysis and decisions...")
-	decision, err := decision.GetFullDecisionWithClient(at.aiClient, ctx)
+	fullDecision, err := decision.GetFullDecisionWithClient(at.aiClient, ctx)
 
 	// 先写入回退系统提示词，确保日志包含该字段（若后续有AI返回则覆盖）
 	record.SystemPrompt = fallbackSystemPrompt
 
 	// 即使有错误，也保存思维链、决策和输入prompt（用于debug）
-	if decision != nil {
-		record.SystemPrompt = decision.SystemPrompt
-		record.InputPrompt = decision.UserPrompt
-		record.CoTTrace = decision.CoTTrace
-		if len(decision.Decisions) > 0 {
-			decisionJSON, _ := json.MarshalIndent(decision.Decisions, "", "  ")
+	if fullDecision != nil {
+		record.SystemPrompt = fullDecision.SystemPrompt
+		record.InputPrompt = fullDecision.UserPrompt
+		record.CoTTrace = fullDecision.CoTTrace
+		if len(fullDecision.Decisions) > 0 {
+			decisionJSON, _ := json.MarshalIndent(fullDecision.Decisions, "", "  ")
 			record.DecisionJSON = string(decisionJSON)
 		} else {
 			// 保证第二步JSON决策数组在无决策时也有可视化输出
@@ -590,11 +662,11 @@ func (at *AutoTrader) runCycle() error {
 		record.ErrorMessage = summarizeDecisionError(fmt.Sprintf("获取AI决策失败: %v", err))
 
 		// 打印AI思维链（即使有错误）
-		if decision != nil && decision.CoTTrace != "" {
+		if fullDecision != nil && fullDecision.CoTTrace != "" {
 			log.Print("\n" + strings.Repeat("-", 70))
 			log.Println("💭 AI思维链分析（错误情况）:")
 			log.Println(strings.Repeat("-", 70))
-			log.Println(decision.CoTTrace)
+			log.Println(fullDecision.CoTTrace)
 			log.Print(strings.Repeat("-", 70) + "\n")
 		}
 
@@ -606,12 +678,12 @@ func (at *AutoTrader) runCycle() error {
 	log.Print("\n" + strings.Repeat("-", 70))
 	log.Println("💭 AI思维链分析:")
 	log.Println(strings.Repeat("-", 70))
-	log.Println(decision.CoTTrace)
+	log.Println(fullDecision.CoTTrace)
 	log.Print(strings.Repeat("-", 70) + "\n")
 
 	// 6. 打印AI决策
-	log.Printf("📋 AI决策列表 (%d 个):\n", len(decision.Decisions))
-	for i, d := range decision.Decisions {
+	log.Printf("📋 AI决策列表 (%d 个):\n", len(fullDecision.Decisions))
+	for i, d := range fullDecision.Decisions {
 		log.Printf("  [%d] %s: %s - %s", i+1, d.Symbol, d.Action, d.Reasoning)
 		if d.Action == "open_long" || d.Action == "open_short" {
 			log.Printf("      杠杆: %dx | 仓位: %.2f USDT | 止损: %.4f | 止盈: %.4f",
@@ -621,7 +693,7 @@ func (at *AutoTrader) runCycle() error {
 	log.Println()
 
 	// 7. 对决策排序：确保先平仓后开仓（防止仓位叠加超限）
-	sortedDecisions := sortDecisionsByPriority(decision.Decisions)
+	sortedDecisions := sortDecisionsByPriority(fullDecision.Decisions)
 
 	log.Println("🔄 执行顺序（已优化）: 先平仓→后开仓")
 	for i, d := range sortedDecisions {
@@ -882,17 +954,37 @@ func (at *AutoTrader) runCycle() error {
 				side = "short"
 			}
 			posKey := d.Symbol + "_" + side
-            if ts, ok := at.positionFirstSeenTime[posKey]; ok && ts > 0 {
-                held := time.Since(time.UnixMilli(ts))
-                if held+at.cycleTolerance < at.config.ScanInterval {
-                    msg := fmt.Sprintf("⏸ 时间门控：%s %s 持仓仅%.0f分钟，跳过本次平仓以遵循%.0f分钟扫描节奏", d.Symbol, side, held.Minutes(), at.config.ScanInterval.Minutes())
-                    log.Println(msg)
-                    actionRecord.Error = "time_gate"
-                    record.ExecutionLog = append(record.ExecutionLog, msg)
-                    record.Decisions = append(record.Decisions, actionRecord)
-                    continue
-                }
-            }
+			if ts, ok := at.positionFirstSeenTime[posKey]; ok && ts > 0 {
+				held := time.Since(time.UnixMilli(ts))
+				if held+at.cycleTolerance < at.config.ScanInterval {
+					msg := fmt.Sprintf("⏸ 时间门控：%s %s 持仓仅%.0f分钟，跳过本次平仓以遵循%.0f分钟扫描节奏", d.Symbol, side, held.Minutes(), at.config.ScanInterval.Minutes())
+					log.Println(msg)
+					actionRecord.Error = "time_gate"
+					record.ExecutionLog = append(record.ExecutionLog, msg)
+					record.Decisions = append(record.Decisions, actionRecord)
+					continue
+				}
+			}
+		}
+
+		// 持仓持有周期门控：对 close_* 决策，在持有周期<3时跳过
+		if d.Action == "close_long" || d.Action == "close_short" {
+			side := "long"
+			if d.Action == "close_short" {
+				side = "short"
+			}
+			posKey := d.Symbol + "_" + side
+			if idx, ok := at.openCycleIndex[posKey]; ok {
+				cyclesHeld := at.currentCycleIndex - idx
+				if cyclesHeld < 3 {
+					msg := fmt.Sprintf("⏸ 持仓周期门控：%s %s 已持有 %d 周期，未满3周期，跳过本次平仓评估", d.Symbol, side, cyclesHeld)
+					log.Println(msg)
+					actionRecord.Error = "cycle_gate"
+					record.ExecutionLog = append(record.ExecutionLog, msg)
+					record.Decisions = append(record.Decisions, actionRecord)
+					continue
+				}
+			}
 		}
 
 		if err := at.executeDecisionWithRecord(&d, &actionRecord); err != nil {
@@ -910,91 +1002,261 @@ func (at *AutoTrader) runCycle() error {
 			}
 			// 成功（含模拟）后短暂延迟
 			time.Sleep(1 * time.Second)
+			// 若为开仓成功，记录开仓周期索引
+			if d.Action == "open_long" || d.Action == "open_short" {
+				side := "long"
+				if d.Action == "open_short" {
+					side = "short"
+				}
+				at.openCycleIndex[d.Symbol+"_"+side] = at.currentCycleIndex
+			}
 		}
 
 		record.Decisions = append(record.Decisions, actionRecord)
 	}
 
-    // 8. 保存决策记录
-    if err := at.decisionLogger.LogDecision(record); err != nil {
-        log.Printf("Failed to save decision record: %v", err)
-    }
+	// 第4周期强制开仓兜底：若最近连续3周期未开仓，且本周期也未开仓，并且未触发硬暂停与保证金/风控限制，则选择置信度最高的候选开一笔
+	func() {
+		// 检查本周期是否已开仓成功
+		openedThisCycle := false
+		for _, act := range record.Decisions {
+			if act.Success && (act.Action == "open_long" || act.Action == "open_short") {
+				openedThisCycle = true
+				break
+			}
+		}
+		// 必须条件：最近3周期未开仓 + 本周期未开仓 + 未在暂停窗口
+		if ctx.IdleNoOpenCycles >= 3 && !openedThisCycle && time.Now().After(at.stopUntil) {
+			// 风控条件：保证金使用率与持仓前提
+			marginUsedPct := record.AccountState.MarginUsedPct
+			if marginUsedPct < at.config.MaxMarginUsagePct && record.AccountState.PositionCount == 0 && len(ctx.CandidateCoins) > 0 {
+				// 选币评分：多周期一致性(4h/1h必需，15m加分)、MACD直方图强度、RSI合理区间
+				type pickResult struct {
+					symbol, action string
+					price          float64
+					score          float64
+				}
+				var best pickResult
+				// 构造候选列表：优先 BTC/ETH/SOL，再加入其他候选
+				seen := map[string]bool{"BTCUSDT": true, "ETHUSDT": true, "SOLUSDT": true}
+				candidates := []string{"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+				for _, c := range ctx.CandidateCoins {
+					if !seen[c.Symbol] {
+						candidates = append(candidates, c.Symbol)
+						seen[c.Symbol] = true
+					}
+				}
+				for _, sym := range candidates {
+					md, ok := ctx.MarketDataMap[sym]
+					if !ok || md.CurrentPrice <= 0 {
+						continue
+					}
+					// 必要一致性：4h与1h
+					direction := 0 // +1 long, -1 short
+					if md.CurrentMACD4h > 0 && md.CurrentMACD1h > 0 {
+						direction = 1
+					}
+					if md.CurrentMACD4h < 0 && md.CurrentMACD1h < 0 {
+						direction = -1
+					}
+					if direction == 0 {
+						continue
+					}
+					score := 0.0
+					// 一致性加分
+					score += 1.0
+					// 15m一致性加分
+					if (direction == 1 && md.CurrentMACD15m > 0) || (direction == -1 && md.CurrentMACD15m < 0) {
+						score += 0.5
+					}
+					// 直方图强度（4h+1h）
+					h4 := math.Abs(md.CurrentMACDHistogram4h)
+					h1 := math.Abs(md.CurrentMACDHistogram1h)
+					// 归一到0~0.5区间，避免巨值主导
+					histScore := math.Min(0.5, (h4*0.001)+(h1*0.001))
+					score += histScore
+					// RSI合理区间（3m RSI7）：长做45~70最佳，空做30~55最佳
+					rsi := md.CurrentRSI7
+					rsiScore := 0.0
+					if direction == 1 {
+						if rsi >= 45 && rsi <= 70 {
+							rsiScore = 0.4
+						} else if rsi >= 35 && rsi <= 75 {
+							rsiScore = 0.2
+						}
+					} else {
+						if rsi >= 30 && rsi <= 55 {
+							rsiScore = 0.4
+						} else if rsi >= 25 && rsi <= 65 {
+							rsiScore = 0.2
+						}
+					}
+					score += rsiScore
+					// 记录最佳
+					if score > best.score {
+						act := "open_long"
+						if direction == -1 {
+							act = "open_short"
+						}
+						best = pickResult{symbol: sym, action: act, price: md.CurrentPrice, score: score}
+					}
+				}
+				if best.symbol == "" {
+					return
+				}
+				symbol := best.symbol
+				price := best.price
+				openAction := best.action
+				// 杠杆：BTC/ETH用btcEthLeverage，其它用altcoinLeverage
+				lev := at.config.AltcoinLeverage
+				if symbol == "BTCUSDT" || symbol == "ETHUSDT" {
+					lev = at.config.BTCETHLeverage
+				}
+				if lev <= 0 {
+					lev = 5
+				}
+				// 仓位计算：单笔风险≤净值1%，止损距离2%
+				equity := record.AccountState.TotalBalance
+				riskUsd := equity * 0.01
+				stopPct := 0.02
+				positionValue := (riskUsd * float64(lev)) / stopPct
+				// 限制最大值以防过度：不超过可用余额的40倍（考虑杠杆）
+				maxPositionValue := record.AccountState.AvailableBalance * 40.0
+				if positionValue > maxPositionValue {
+					positionValue = maxPositionValue
+				}
+				// 设置SL/TP
+				sl := price
+				tp := price
+				if openAction == "open_long" {
+					sl = price * (1.0 - stopPct)
+					tp = price * (1.0 + 0.04)
+				} else {
+					sl = price * (1.0 + stopPct)
+					tp = price * (1.0 - 0.04)
+				}
+				// 组装并执行
+				forced := decision.Decision{
+					Symbol:          symbol,
+					Action:          openAction,
+					Leverage:        lev,
+					PositionSizeUSD: positionValue,
+					StopLoss:        sl,
+					TakeProfit:      tp,
+					Confidence:      0.66,
+					Reasoning:       fmt.Sprintf("must_open_due_to_idle_cycles=true | score=%.2f | 4h/1h一致 + 15m加分 + RSI区间", best.score),
+				}
+				ar := logger.DecisionAction{
+					Action:    forced.Action,
+					Symbol:    forced.Symbol,
+					Quantity:  0,
+					Leverage:  forced.Leverage,
+					Price:     0,
+					Timestamp: time.Now(),
+					Success:   false,
+				}
+				msg := fmt.Sprintf("⚙️ 强制开仓触发：最近未开仓周期=%d，选择 %s %s", ctx.IdleNoOpenCycles, forced.Symbol, forced.Action)
+				log.Println(msg)
+				record.ExecutionLog = append(record.ExecutionLog, msg)
+				if err := at.executeDecisionWithRecord(&forced, &ar); err != nil {
+					log.Printf("Forced open failed (%s %s): %v", forced.Symbol, forced.Action, err)
+					ar.Error = err.Error()
+					record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("%s %s failed: %v", forced.Symbol, forced.Action, err))
+				} else {
+					ar.Success = true
+					// 记录开仓周期索引
+					side := "long"
+					if forced.Action == "open_short" {
+						side = "short"
+					}
+					at.openCycleIndex[forced.Symbol+"_"+side] = at.currentCycleIndex
+					record.ExecutionLog = append(record.ExecutionLog, fmt.Sprintf("%s %s succeeded", forced.Symbol, forced.Action))
+				}
+				record.Decisions = append(record.Decisions, ar)
+			}
+		}
+	}()
 
-    // 9. 亏损保护（硬性要求）：触发后在规定时间段内停止所有AI分析
-    // 规则：
-    // - 连续亏损3笔 → 暂停2小时
-    // - 单笔亏损≥10%（相对保证金）→ 暂停1小时
-    // - 当日总亏损≥20%（相对当日基线）→ 暂停2小时
-    // - 连续亏损3笔 且 当日亏损≥20% → 暂停6小时
-    func() {
-        // 读取账户当日盈亏信息
-        accountInfo, _ := at.GetAccountInfo()
-        dailyPnL := 0.0
-        dailyBaseline := at.dailyBaseline
-        if v, ok := accountInfo["daily_pnl"].(float64); ok {
-            dailyPnL = v
-        }
-        dailyLossPct := 0.0
-        if dailyBaseline > 0 && dailyPnL < 0 {
-            dailyLossPct = (-(dailyPnL) / dailyBaseline) * 100
-        }
+	// 8. 保存决策记录
+	if err := at.decisionLogger.LogDecision(record); err != nil {
+		log.Printf("Failed to save decision record: %v", err)
+	}
 
-        // 分析最近交易结果
-        var lastTradeLossPct float64
-        consecutiveLosses := 0
-        if at.decisionLogger != nil {
-            if perf, err := at.decisionLogger.AnalyzePerformance(50); err == nil {
-                // 最近交易最新在前
-                for i := 0; i < len(perf.RecentTrades); i++ {
-                    t := perf.RecentTrades[i]
-                    if t.PnL < 0 {
-                        consecutiveLosses++
-                    } else if t.PnL > 0 {
-                        break
-                    }
-                }
-                if len(perf.RecentTrades) > 0 {
-                    lastTradeLossPct = perf.RecentTrades[0].PnLPct
-                    if lastTradeLossPct > 0 {
-                        // 仅在为亏损时才生效
-                        lastTradeLossPct = 0
-                    } else {
-                        lastTradeLossPct = -lastTradeLossPct
-                    }
-                }
-            }
-        }
+	// 9. 亏损保护（硬性要求）：触发后在规定时间段内停止所有AI分析
+	// 规则：
+	// - 连续亏损3笔 → 暂停2小时
+	// - 单笔亏损≥10%（相对保证金）→ 暂停1小时
+	// - 当日总亏损≥20%（相对当日基线）→ 暂停2小时
+	// - 连续亏损3笔 且 当日亏损≥20% → 暂停6小时
+	func() {
+		// 读取账户当日盈亏信息
+		accountInfo, _ := at.GetAccountInfo()
+		dailyPnL := 0.0
+		dailyBaseline := at.dailyBaseline
+		if v, ok := accountInfo["daily_pnl"].(float64); ok {
+			dailyPnL = v
+		}
+		dailyLossPct := 0.0
+		if dailyBaseline > 0 && dailyPnL < 0 {
+			dailyLossPct = (-(dailyPnL) / dailyBaseline) * 100
+		}
 
-        // 计算暂停时长
-        pause := time.Duration(0)
-        reason := ""
-        condA := consecutiveLosses >= 3
-        condB := dailyLossPct >= 20.0
-        condC := lastTradeLossPct >= 10.0
+		// 分析最近交易结果
+		var lastTradeLossPct float64
+		consecutiveLosses := 0
+		if at.decisionLogger != nil {
+			if perf, err := at.decisionLogger.AnalyzePerformance(50); err == nil {
+				// 最近交易最新在前
+				for i := 0; i < len(perf.RecentTrades); i++ {
+					t := perf.RecentTrades[i]
+					if t.PnL < 0 {
+						consecutiveLosses++
+					} else if t.PnL > 0 {
+						break
+					}
+				}
+				if len(perf.RecentTrades) > 0 {
+					lastTradeLossPct = perf.RecentTrades[0].PnLPct
+					if lastTradeLossPct > 0 {
+						// 仅在为亏损时才生效
+						lastTradeLossPct = 0
+					} else {
+						lastTradeLossPct = -lastTradeLossPct
+					}
+				}
+			}
+		}
 
-        if condA && condB {
-            pause = 6 * time.Hour
-            reason = "连续亏损3笔且当日亏损≥20%，暂停6小时"
-        } else if condA {
-            pause = 2 * time.Hour
-            reason = "连续亏损3笔，暂停2小时"
-        } else if condB {
-            pause = 2 * time.Hour
-            reason = "当日总亏损≥20%，暂停2小时"
-        } else if condC {
-            pause = 1 * time.Hour
-            reason = "单笔亏损≥10%，暂停1小时"
-        }
+		// 计算暂停时长
+		pause := time.Duration(0)
+		reason := ""
+		condA := consecutiveLosses >= 3
+		condB := dailyLossPct >= 20.0
+		condC := lastTradeLossPct >= 10.0
 
-        if pause > 0 {
-            at.stopUntil = time.Now().Add(pause)
-            msg := fmt.Sprintf("⏸ 亏损保护触发：%s（至 %s）", reason, at.stopUntil.Format("15:04"))
-            log.Println(msg)
-            record.ExecutionLog = append(record.ExecutionLog, msg)
-        }
-    }()
+		if condA && condB {
+			pause = 6 * time.Hour
+			reason = "连续亏损3笔且当日亏损≥20%，暂停6小时"
+		} else if condA {
+			pause = 2 * time.Hour
+			reason = "连续亏损3笔，暂停2小时"
+		} else if condB {
+			pause = 2 * time.Hour
+			reason = "当日总亏损≥20%，暂停2小时"
+		} else if condC {
+			pause = 1 * time.Hour
+			reason = "单笔亏损≥10%，暂停1小时"
+		}
 
-    return nil
+		if pause > 0 {
+			at.stopUntil = time.Now().Add(pause)
+			msg := fmt.Sprintf("⏸ 亏损保护触发：%s（至 %s）", reason, at.stopUntil.Format("15:04"))
+			log.Println(msg)
+			record.ExecutionLog = append(record.ExecutionLog, msg)
+		}
+	}()
+
+	return nil
 }
 
 // buildTradingContext 构建交易上下文
@@ -1135,26 +1397,46 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		stop := at.softStopPrices[key]
 		take := at.softTakePrices[key]
 		if stop > 0 && take > 0 && markPrice > 0 {
+			// 持仓持有周期门控：软止损/止盈在未满3周期时不触发（极端fallback另行处理）
+			if idx, ok := at.openCycleIndex[key]; ok {
+				cyclesHeld := at.currentCycleIndex - idx
+				if cyclesHeld < 3 {
+					log.Printf("⏸ 持仓周期门控：%s %s 未满3周期（%d），软SL/TP本周期不触发", symbol, side, cyclesHeld)
+					continue
+				}
+			}
 			if side == "long" {
 				if markPrice <= stop {
 					log.Printf("  🧠 软止损触发：%s long mark=%.4f ≤ stop=%.4f（在本周期执行平仓）", symbol, markPrice, stop)
 					_, _ = at.trader.CloseLong(symbol, 0)
+					if at.skipAiCycles < 2 {
+						at.skipAiCycles = 2
+					}
 					continue
 				}
 				if markPrice >= take {
 					log.Printf("  🧠 软止盈触发：%s long mark=%.4f ≥ take=%.4f（在本周期执行平仓）", symbol, markPrice, take)
 					_, _ = at.trader.CloseLong(symbol, 0)
+					if at.skipAiCycles < 2 {
+						at.skipAiCycles = 2
+					}
 					continue
 				}
 			} else if side == "short" {
 				if markPrice >= stop {
 					log.Printf("  🧠 软止损触发：%s short mark=%.4f ≥ stop=%.4f（在本周期执行平仓）", symbol, markPrice, stop)
 					_, _ = at.trader.CloseShort(symbol, 0)
+					if at.skipAiCycles < 2 {
+						at.skipAiCycles = 2
+					}
 					continue
 				}
 				if markPrice <= take {
 					log.Printf("  🧠 软止盈触发：%s short mark=%.4f ≤ take=%.4f（在本周期执行平仓）", symbol, markPrice, take)
 					_, _ = at.trader.CloseShort(symbol, 0)
+					if at.skipAiCycles < 2 {
+						at.skipAiCycles = 2
+					}
 					continue
 				}
 			}
@@ -1232,6 +1514,26 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		performance = nil
 	}
 
+	// 统计连续未开仓周期数（最近从新到旧，连续没有open_*成功的周期计数）
+	idleNoOpen := 0
+	if records, err := at.decisionLogger.GetLatestRecords(4); err == nil {
+		// 从新到旧计数
+		for i := len(records) - 1; i >= 0; i-- {
+			rec := records[i]
+			opened := false
+			for _, act := range rec.Decisions {
+				if act.Success && (act.Action == "open_long" || act.Action == "open_short") {
+					opened = true
+					break
+				}
+			}
+			if opened {
+				break
+			}
+			idleNoOpen++
+		}
+	}
+
 	// 6. 构建上下文
 	ctx := &decision.Context{
 		CurrentTime:     time.Now().Format("2006-01-02 15:04:05"),
@@ -1257,6 +1559,7 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		CycleWeight1h:      at.config.CycleWeights.W1h,
 		CycleWeight15m:     at.config.CycleWeights.W15m,
 		CycleWeight3m:      at.config.CycleWeights.W3m,
+		IdleNoOpenCycles:   idleNoOpen,
 	}
 
 	return ctx, nil
@@ -2185,6 +2488,22 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 		"ai_provider":                aiProvider,
 		"execution_enabled":          at.executionEnabled,
 		"prompt_variant":             variant,
+		"current_cycle_index":        at.currentCycleIndex,
+		"last_cycle_start": func() string {
+			if !at.lastCycleStart.IsZero() {
+				return at.lastCycleStart.Format(time.RFC3339)
+			} else {
+				return ""
+			}
+		}(),
+		"next_cycle_due": func() string {
+			if !at.nextCycleDue.IsZero() {
+				return at.nextCycleDue.Format(time.RFC3339)
+			} else {
+				return ""
+			}
+		}(),
+		"cooldown_cycles_remaining": at.skipAiCycles,
 	}
 }
 

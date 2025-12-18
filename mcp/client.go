@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -144,12 +146,18 @@ func (cfg *Client) callOnce(systemPrompt, userPrompt string) (string, error) {
 	})
 
 	// 构建请求体
-    requestBody := map[string]interface{}{
-        "model":       cfg.Model,
-        "messages":    messages,
-        "temperature": 0.2,
-        "max_tokens":  3800,
-    }
+	maxTokens := 3800
+	if v := os.Getenv("NOFX_AI_MAX_TOKENS"); strings.TrimSpace(v) != "" {
+		if x, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && x > 512 {
+			maxTokens = x
+		}
+	}
+	requestBody := map[string]interface{}{
+		"model":       cfg.Model,
+		"messages":    messages,
+		"temperature": 0.2,
+		"max_tokens":  maxTokens,
+	}
 
 	// 注意：response_format 参数仅 OpenAI 支持，DeepSeek/Qwen 不支持
 	// 我们通过强化 prompt 和后处理来确保 JSON 格式正确

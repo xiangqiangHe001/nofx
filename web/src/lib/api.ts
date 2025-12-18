@@ -132,7 +132,7 @@ export const api = {
     const url = query
       ? `${API_BASE}/performance?${query}`
       : `${API_BASE}/performance`;
-    return fetchWithRetry(url);
+    return fetchWithRetry(url, undefined, 2, 20000);
   },
 
   // 获取自动执行开关状态

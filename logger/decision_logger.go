@@ -397,7 +397,19 @@ func (l *DecisionLogger) AnalyzePerformance(lookbackCycles int) (*PerformanceAna
 
 	// 为了避免开仓记录在窗口外导致匹配失败，需要先从所有历史记录中找出未平仓的持仓
 	// 获取更多历史记录来构建完整的持仓状态（使用更大的窗口）
-	allRecords, err := l.GetLatestRecords(lookbackCycles * 3) // 扩大3倍窗口
+	// 优化：避免读取过多文件导致性能问题，使用受控的预填窗口
+	prefillWindow := lookbackCycles + 200
+	if prefillWindow < lookbackCycles {
+		prefillWindow = lookbackCycles
+	}
+	// 上限为原窗口的2倍，并总体不超过2000条
+	if prefillWindow > lookbackCycles*2 {
+		prefillWindow = lookbackCycles * 2
+	}
+	if prefillWindow > 2000 {
+		prefillWindow = 2000
+	}
+	allRecords, err := l.GetLatestRecords(prefillWindow)
 	if err == nil && len(allRecords) > len(records) {
 		// 先从扩大的窗口中收集所有开仓记录
 		for _, record := range allRecords {
