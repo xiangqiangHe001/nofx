@@ -189,8 +189,8 @@ if ($Token) {
         }
         & git -c credential.helper= $pushArgs
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "Push failed. 建议：设置环境变量 NOFX_GITHUB_PAT 或使用 -Token 传入 GitHub PAT（scope: repo）。" -ForegroundColor Red
-            Write-Host "示例：在当前会话执行 `$env:NOFX_GITHUB_PAT='ghp_xxx' 后再运行脚本，或直接传入 -Token 参数。" -ForegroundColor Cyan
+            Write-Host "Push failed. Suggestion: Set env var NOFX_GITHUB_PAT or use -Token parameter (scope: repo)." -ForegroundColor Red
+            Write-Host "Example: `$env:NOFX_GITHUB_PAT='ghp_xxx' or pass -Token 'ghp_xxx'" -ForegroundColor Cyan
             exit 1
         }
     }
